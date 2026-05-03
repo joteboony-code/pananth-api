@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>ห้องเช่าป่านันท์ v15.4.2.21</title>
+<title>ห้องเช่าป่านันท์ v15.4.2.22</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&family=Kanit:wght@500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script>
@@ -321,7 +321,7 @@ async function backupToR2() {
       body: JSON.stringify({
         action: 'backupToR2',
         billingMeta,
-        createdFrom: 'web-v15.4.2.21'
+        createdFrom: 'web-v15.4.2.22'
       })
     });
 
@@ -1502,15 +1502,12 @@ async function clearErrorLogs() {
     <span style="font-size:20px;">📝</span> จดมิเตอร์รอบบิลใหม่
   </button>
 </div>
-<div class="month-action-note">
-  <span>เปิดรอบรับชำระใหม่ = ปิดรอบบิลเดิม ย้ายมิเตอร์ครั้งหลังเป็นครั้งก่อน และรีเซ็ตสถานะ</span>
-  <span>จดมิเตอร์ = กรอกเลขมิเตอร์ของรอบบิลที่กำลังเก็บค่าเช่า</span>
+<div class="month-action-note" style="display:none;">
   <span id="openCycleLockNote" style="font-weight:800;color:var(--accent);"></span>
 </div>
 <div class="controls">
   <div class="month-input month-display" id="monthDisplay">รับชำระ เมษายน 2569</div>
   <input type="hidden" id="monthPicker" value="2026-04">
-  <div class="month-display-note">เดือนนี้เป็นเดือนรับชำระเท่านั้น หากต้องการเปลี่ยนรอบ ให้ใช้ปุ่ม “เปิดรอบรับชำระใหม่”</div>
   <button class="ctrl-btn outline" onclick="openSettings()">⚙️ ตั้งค่า LINE</button>
   <button class="ctrl-btn primary" onclick="openImport()">📂 นำเข้า Excel</button>
   <button class="ctrl-btn green" onclick="exportExcel()">💾 บันทึก Excel</button>
@@ -4906,7 +4903,7 @@ async function createSafetyBackup(reason = 'manual') {
         action: 'createSafetyBackup',
         reason,
         billingMeta,
-        createdFrom: 'web-v15.4.2.21'
+        createdFrom: 'web-v15.4.2.22'
       })
     });
     if (!res.ok) throw new Error(await res.text());
@@ -7105,7 +7102,7 @@ function pinInput(num) {
             document.getElementById('pinError').textContent = `❌ รหัสไม่ถูกต้อง เหลืออีก ${data.remainingAttempts} ครั้งครับ`;
             setTimeout(() => document.getElementById('pinError').textContent = '', 2000);
           } else {
-            // fallback เผื่อ Worker เก่า/เน็ตหลุด: ยังล็อกหน้าเว็บไว้ชั่วคราว แต่ Worker v15.4.2.21 จะล็อกจริงใน KV
+            // fallback เผื่อ Worker เก่า/เน็ตหลุด: ยังล็อกหน้าเว็บไว้ชั่วคราว แต่ Worker v15.4.2.22 จะล็อกจริงใน KV
             pinFailCount++;
             if (pinFailCount >= PIN_MAX_FAIL) {
               pinLockUntil = Date.now() + PIN_LOCK_MINUTES * 60 * 1000;
