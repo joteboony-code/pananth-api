@@ -1,2 +1,0 @@
-# pananth-rental-app
-Rental
