@@ -1,0 +1,32 @@
+name: Deploy HTML Worker
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "index.html"
+      - "wrangler-html.toml"
+      - ".github/workflows/deploy-html.yml"
+  workflow_dispatch:
+
+jobs:
+  deploy-html:
+    name: Deploy pananth
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare HTML assets
+        run: |
+          rm -rf .deploy-html
+          mkdir -p .deploy-html
+          cp index.html .deploy-html/index.html
+
+      - name: Deploy HTML Worker
+        run: npx wrangler@latest deploy --config wrangler-html.toml
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
