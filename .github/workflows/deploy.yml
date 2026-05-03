@@ -1,0 +1,32 @@
+name: Deploy Cloudflare Worker
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          secrets: |
+            EASYSLIP_API_KEY
+            LINE_CHANNEL_SECRET
+            LINE_TOKEN
+            OWNER_ID
+        env:
+          EASYSLIP_API_KEY: ${{ secrets.EASYSLIP_API_KEY }}
+          LINE_CHANNEL_SECRET: ${{ secrets.LINE_CHANNEL_SECRET }}
+          LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
+          OWNER_ID: ${{ secrets.OWNER_ID }}
