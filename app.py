@@ -1,3 +1,6 @@
+import hashlib
+import hmac
+import json
 import os
 from datetime import datetime, date
 
@@ -5,7 +8,7 @@ from dotenv import load_dotenv
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
 
 from models import db, Room, Tenant, Payment
-from line_notify import send_line_notify, build_rent_message
+from line_messaging import send_push_message, reply_message, build_rent_message
 
 load_dotenv()
 
@@ -95,7 +98,8 @@ def delete_room(room_id):
 @app.route("/tenants")
 def tenants():
     all_tenants = Tenant.query.order_by(Tenant.name).all()
-    return render_template("tenants.html", tenants=all_tenants)
+    bot_basic_id = os.getenv("LINE_BOT_BASIC_ID", "")
+    return render_template("tenants.html", tenants=all_tenants, bot_basic_id=bot_basic_id)
 
 
 @app.route("/tenants/add", methods=["GET", "POST"])
@@ -109,7 +113,7 @@ def add_tenant():
         tenant = Tenant(
             name=request.form["name"].strip(),
             phone=request.form.get("phone", "").strip(),
-            line_token=request.form.get("line_token", "").strip(),
+            line_user_id=request.form.get("line_user_id", "").strip(),
             move_in_date=move_in,
             room_id=room_id,
         )
@@ -136,7 +140,7 @@ def edit_tenant(tenant_id):
 
         tenant.name = request.form["name"].strip()
         tenant.phone = request.form.get("phone", "").strip()
-        tenant.line_token = request.form.get("line_token", "").strip()
+        tenant.line_user_id = request.form.get("line_user_id", "").strip()
         move_in_str = request.form.get("move_in_date")
         tenant.move_in_date = date.fromisoformat(move_in_str) if move_in_str else None
         tenant.room_id = new_room_id
@@ -203,7 +207,6 @@ def payments():
 
 @app.route("/payments/generate", methods=["POST"])
 def generate_payments():
-    """Create payment records for all active tenants for a given month."""
     year = int(request.form["year"])
     month = int(request.form["month"])
 
@@ -263,7 +266,7 @@ def mark_paid(payment_id):
     return redirect(url_for("payments", year=payment.year, month=payment.month))
 
 
-# ─── LINE Notify ──────────────────────────────────────────────────────────────
+# ─── LINE Messaging ───────────────────────────────────────────────────────────
 
 @app.route("/payments/<int:payment_id>/notify", methods=["POST"])
 def notify_payment(payment_id):
@@ -271,8 +274,8 @@ def notify_payment(payment_id):
     tenant = payment.tenant
     room = payment.room
 
-    if not tenant.line_token:
-        flash(f"ผู้เช่า {tenant.name} ยังไม่ได้ตั้งค่า LINE Token", "warning")
+    if not tenant.line_user_id:
+        flash(f"ผู้เช่า {tenant.name} ยังไม่มี LINE User ID", "warning")
         return redirect(url_for("payments", year=payment.year, month=payment.month))
 
     message = build_rent_message(
@@ -287,7 +290,7 @@ def notify_payment(payment_id):
         month_name_th=payment.month_name_th,
     )
 
-    result = send_line_notify(tenant.line_token, message)
+    result = send_push_message(tenant.line_user_id, message)
     if result["success"]:
         payment.notified_at = datetime.utcnow()
         db.session.commit()
@@ -300,7 +303,6 @@ def notify_payment(payment_id):
 
 @app.route("/payments/notify-all", methods=["POST"])
 def notify_all():
-    """Send LINE notification to all pending payments in a given month."""
     year = int(request.form["year"])
     month = int(request.form["month"])
 
@@ -309,7 +311,7 @@ def notify_all():
 
     for payment in pending:
         tenant = payment.tenant
-        if not tenant.line_token:
+        if not tenant.line_user_id:
             skipped += 1
             continue
         message = build_rent_message(
@@ -323,7 +325,7 @@ def notify_all():
             total=payment.total_amount,
             month_name_th=payment.month_name_th,
         )
-        result = send_line_notify(tenant.line_token, message)
+        result = send_push_message(tenant.line_user_id, message)
         if result["success"]:
             payment.notified_at = datetime.utcnow()
             sent += 1
@@ -332,10 +334,75 @@ def notify_all():
 
     db.session.commit()
     flash(
-        f"ส่งแจ้งเตือน LINE สำเร็จ {sent} ราย | ล้มเหลว {failed} ราย | ไม่มี token {skipped} ราย",
+        f"ส่งแจ้งเตือน LINE สำเร็จ {sent} ราย | ล้มเหลว {failed} ราย | ไม่มี User ID {skipped} ราย",
         "info",
     )
     return redirect(url_for("payments", year=year, month=month))
+
+
+# ─── LINE Webhook (auto-capture User ID) ──────────────────────────────────────
+
+@app.route("/webhook/line", methods=["POST"])
+def line_webhook():
+    """
+    Receives LINE Messaging API webhook events.
+    When a tenant follows the bot, store their User ID matched by phone number
+    if they send their phone as a message (e.g. "0812345678").
+    """
+    channel_secret = os.getenv("LINE_CHANNEL_SECRET", "")
+
+    # Verify webhook signature
+    signature = request.headers.get("X-Line-Signature", "")
+    body = request.get_data(as_text=True)
+    if channel_secret:
+        expected = hmac.new(
+            channel_secret.encode("utf-8"),
+            body.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+        import base64
+        expected_b64 = base64.b64encode(expected).decode("utf-8")
+        if not hmac.compare_digest(expected_b64, signature):
+            return jsonify({"error": "invalid signature"}), 400
+
+    data = json.loads(body)
+    for event in data.get("events", []):
+        event_type = event.get("type")
+        user_id = event.get("source", {}).get("userId", "")
+        reply_token = event.get("replyToken", "")
+
+        if event_type == "follow":
+            # Bot was added — ask tenant to confirm their phone number
+            reply_message(
+                reply_token,
+                "สวัสดีครับ! กรุณาพิมพ์เบอร์โทรศัพท์ที่ลงทะเบียนไว้กับห้องเช่า\nเพื่อยืนยันตัวตนและรับแจ้งเตือนค่าเช่า"
+            )
+
+        elif event_type == "message" and event.get("message", {}).get("type") == "text":
+            text = event["message"]["text"].strip()
+            # Check if message looks like a phone number
+            digits = text.replace("-", "").replace(" ", "")
+            if digits.isdigit() and 9 <= len(digits) <= 10:
+                tenant = Tenant.query.filter_by(phone=digits).first()
+                if not tenant and digits.startswith("0"):
+                    # Try with country code variant
+                    tenant = Tenant.query.filter_by(phone=f"+66{digits[1:]}").first()
+                if tenant:
+                    tenant.line_user_id = user_id
+                    db.session.commit()
+                    reply_message(
+                        reply_token,
+                        f"ยืนยันตัวตนสำเร็จ! สวัสดีคุณ {tenant.name}\n"
+                        f"ห้อง: {tenant.room.number if tenant.room else '-'}\n"
+                        "ท่านจะได้รับแจ้งเตือนค่าเช่าผ่าน LINE นี้ครับ"
+                    )
+                else:
+                    reply_message(
+                        reply_token,
+                        "ไม่พบข้อมูลจากเบอร์โทรนี้ กรุณาติดต่อเจ้าของห้องเช่าครับ"
+                    )
+
+    return jsonify({"status": "ok"})
 
 
 if __name__ == "__main__":

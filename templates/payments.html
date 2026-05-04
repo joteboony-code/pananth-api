@@ -110,7 +110,7 @@
                 </button>
               </form>
               {% endif %}
-              {% if p.tenant.line_token and p.status == 'pending' %}
+              {% if p.tenant.line_user_id and p.status == 'pending' %}
               <form method="post" action="/payments/{{ p.id }}/notify"
                     onsubmit="return confirm('ส่ง LINE แจ้งเตือนให้ {{ p.tenant.name }}?')">
                 <button class="btn btn-sm line-btn" title="ส่ง LINE">

@@ -27,7 +27,7 @@ class Tenant(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), nullable=False)
     phone = db.Column(db.String(20), nullable=True)
-    line_token = db.Column(db.String(255), nullable=True)  # LINE Notify token
+    line_user_id = db.Column(db.String(100), nullable=True)  # LINE User ID (Uxxxxxxxx)
     move_in_date = db.Column(db.Date, nullable=True)
     move_out_date = db.Column(db.Date, nullable=True)
     is_active = db.Column(db.Boolean, default=True)

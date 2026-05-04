@@ -41,14 +41,13 @@
                value="{{ tenant.move_in_date.isoformat() if tenant and tenant.move_in_date else '' }}">
       </div>
       <div class="mb-4">
-        <label class="form-label fw-semibold">LINE Notify Token</label>
-        <input type="text" name="line_token" class="form-control"
-               value="{{ tenant.line_token if tenant else '' }}"
-               placeholder="วาง token จาก notify-bot.line.me">
+        <label class="form-label fw-semibold">LINE User ID</label>
+        <input type="text" name="line_user_id" class="form-control"
+               value="{{ tenant.line_user_id if tenant else '' }}"
+               placeholder="Uxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx">
         <div class="form-text">
-          รับ token ได้จาก
-          <a href="https://notify-bot.line.me" target="_blank">notify-bot.line.me</a>
-          → My page → Generate token
+          ระบบจะได้รับ User ID อัตโนมัติเมื่อผู้เช่า Add LINE OA แล้วส่งเบอร์โทรยืนยัน
+          หรือกรอกด้วยตนเองก็ได้
         </div>
       </div>
       <button type="submit" class="btn btn-primary">

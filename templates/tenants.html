@@ -6,6 +6,17 @@
   <a href="/tenants/add" class="btn btn-primary"><i class="bi bi-plus-lg me-1"></i>เพิ่มผู้เช่า</a>
 </div>
 
+{% if bot_basic_id %}
+<div class="alert alert-info d-flex align-items-start gap-2 mb-3">
+  <i class="bi bi-chat-dots-fill fs-5 mt-1 text-success"></i>
+  <div>
+    <strong>วิธีให้ผู้เช่ารับแจ้งเตือน LINE:</strong>
+    ให้ผู้เช่า Add LINE OA <strong>@{{ bot_basic_id }}</strong> เป็นเพื่อน
+    แล้วพิมพ์เบอร์โทรศัพท์ที่ลงทะเบียนไว้ — ระบบจะจับ LINE User ID อัตโนมัติ
+  </div>
+</div>
+{% endif %}
+
 <div class="card">
   <div class="card-body p-0">
     {% if tenants %}
@@ -15,7 +26,7 @@
           <th>ชื่อ</th>
           <th>ห้อง</th>
           <th>เบอร์โทร</th>
-          <th>LINE Token</th>
+          <th>LINE</th>
           <th>วันที่เข้า</th>
           <th></th>
         </tr>
@@ -27,10 +38,10 @@
           <td>{{ tenant.room.number if tenant.room else '-' }}</td>
           <td>{{ tenant.phone or '-' }}</td>
           <td>
-            {% if tenant.line_token %}
-              <span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>ตั้งค่าแล้ว</span>
+            {% if tenant.line_user_id %}
+              <span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>เชื่อมต่อแล้ว</span>
             {% else %}
-              <span class="badge bg-secondary">ยังไม่ตั้งค่า</span>
+              <span class="badge bg-secondary">ยังไม่เชื่อมต่อ</span>
             {% endif %}
           </td>
           <td>{{ tenant.move_in_date.strftime('%d/%m/%Y') if tenant.move_in_date else '-' }}</td>
