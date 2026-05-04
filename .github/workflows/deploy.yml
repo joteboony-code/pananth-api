@@ -14,11 +14,11 @@ jobs:
       - name: Deploy Worker (white-rice-cf72)
         uses: cloudflare/wrangler-action@v3
         with:
-          apiToken: ${{ secrets.CF_API_TOKEN }}
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           workingDirectory: worker
 
       - name: Deploy HTML to Pages (pananth)
         uses: cloudflare/wrangler-action@v3
         with:
-          apiToken: ${{ secrets.CF_API_TOKEN }}
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           command: pages deploy ../public --project-name=pananth
