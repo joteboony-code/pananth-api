@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{% block title %}ระบบห้องเช่า{% endblock %}</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" />
+  <style>
+    body { background: #f8f9fa; font-family: 'Sarabun', sans-serif; }
+    .sidebar { min-height: 100vh; background: #1a1a2e; }
+    .sidebar .nav-link { color: #adb5bd; padding: .6rem 1.2rem; border-radius: 6px; }
+    .sidebar .nav-link:hover, .sidebar .nav-link.active { background: #16213e; color: #fff; }
+    .sidebar .brand { color: #06d6a0; font-weight: 700; font-size: 1.2rem; padding: 1.5rem 1.2rem; display: block; }
+    .card { border: none; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+    .badge-status-occupied { background: #198754; }
+    .badge-status-vacant { background: #6c757d; }
+    .line-btn { background: #06C755; border: none; color: white; }
+    .line-btn:hover { background: #05a847; color: white; }
+  </style>
+</head>
+<body>
+<div class="container-fluid p-0">
+  <div class="row g-0">
+    <!-- Sidebar -->
+    <div class="col-auto sidebar d-flex flex-column" style="width:220px; min-width:220px;">
+      <a class="brand" href="/"><i class="bi bi-building me-2"></i>ห้องเช่า</a>
+      <nav class="nav flex-column px-2 gap-1">
+        <a class="nav-link {% if request.path == '/' %}active{% endif %}" href="/">
+          <i class="bi bi-speedometer2 me-2"></i>ภาพรวม
+        </a>
+        <a class="nav-link {% if '/rooms' in request.path %}active{% endif %}" href="/rooms">
+          <i class="bi bi-door-closed me-2"></i>ห้องพัก
+        </a>
+        <a class="nav-link {% if '/tenants' in request.path %}active{% endif %}" href="/tenants">
+          <i class="bi bi-people me-2"></i>ผู้เช่า
+        </a>
+        <a class="nav-link {% if '/payments' in request.path %}active{% endif %}" href="/payments">
+          <i class="bi bi-cash-coin me-2"></i>ค่าเช่า
+        </a>
+      </nav>
+    </div>
+
+    <!-- Main content -->
+    <div class="col">
+      <main class="p-4">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+          {% for category, message in messages %}
+            <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+              {{ message }}
+              <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            </div>
+          {% endfor %}
+        {% endwith %}
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+  </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

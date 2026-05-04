@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}{{ 'แก้ไขผู้เช่า' if tenant else 'เพิ่มผู้เช่า' }} - ระบบห้องเช่า{% endblock %}
+{% block content %}
+<div class="d-flex align-items-center gap-2 mb-4">
+  <a href="/tenants" class="btn btn-outline-secondary btn-sm"><i class="bi bi-arrow-left"></i></a>
+  <h4 class="mb-0">{{ 'แก้ไขผู้เช่า' if tenant else 'เพิ่มผู้เช่า' }}</h4>
+</div>
+
+<div class="card" style="max-width:520px;">
+  <div class="card-body">
+    <form method="post">
+      <div class="mb-3">
+        <label class="form-label fw-semibold">ชื่อ-นามสกุล <span class="text-danger">*</span></label>
+        <input type="text" name="name" class="form-control" required
+               value="{{ tenant.name if tenant else '' }}" placeholder="ชื่อผู้เช่า">
+      </div>
+      <div class="mb-3">
+        <label class="form-label fw-semibold">เบอร์โทรศัพท์</label>
+        <input type="tel" name="phone" class="form-control"
+               value="{{ tenant.phone if tenant else '' }}" placeholder="0812345678">
+      </div>
+      <div class="mb-3">
+        <label class="form-label fw-semibold">ห้องพัก</label>
+        <select name="room_id" class="form-select">
+          <option value="">-- ไม่ระบุ --</option>
+          {% for room in rooms %}
+          <option value="{{ room.id }}"
+            {{ 'selected' if tenant and tenant.room_id == room.id }}>
+            ห้อง {{ room.number }}
+            ({{ "{:,.0f}".format(room.monthly_rent) }} บาท)
+            {% if room.status == 'occupied' and not (tenant and tenant.room_id == room.id) %}
+              [มีผู้เช่า]
+            {% endif %}
+          </option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="mb-3">
+        <label class="form-label fw-semibold">วันที่เข้าพัก</label>
+        <input type="date" name="move_in_date" class="form-control"
+               value="{{ tenant.move_in_date.isoformat() if tenant and tenant.move_in_date else '' }}">
+      </div>
+      <div class="mb-4">
+        <label class="form-label fw-semibold">LINE Notify Token</label>
+        <input type="text" name="line_token" class="form-control"
+               value="{{ tenant.line_token if tenant else '' }}"
+               placeholder="วาง token จาก notify-bot.line.me">
+        <div class="form-text">
+          รับ token ได้จาก
+          <a href="https://notify-bot.line.me" target="_blank">notify-bot.line.me</a>
+          → My page → Generate token
+        </div>
+      </div>
+      <button type="submit" class="btn btn-primary">
+        <i class="bi bi-check-lg me-1"></i>บันทึก
+      </button>
+      <a href="/tenants" class="btn btn-outline-secondary ms-2">ยกเลิก</a>
+    </form>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}{{ 'แก้ไขห้อง' if room else 'เพิ่มห้อง' }} - ระบบห้องเช่า{% endblock %}
+{% block content %}
+<div class="d-flex align-items-center gap-2 mb-4">
+  <a href="/rooms" class="btn btn-outline-secondary btn-sm"><i class="bi bi-arrow-left"></i></a>
+  <h4 class="mb-0">{{ 'แก้ไขห้อง' if room else 'เพิ่มห้องพัก' }}</h4>
+</div>
+
+<div class="card" style="max-width:500px;">
+  <div class="card-body">
+    <form method="post">
+      <div class="mb-3">
+        <label class="form-label fw-semibold">หมายเลขห้อง <span class="text-danger">*</span></label>
+        <input type="text" name="number" class="form-control" required
+               value="{{ room.number if room else '' }}" placeholder="เช่น 101, A01">
+      </div>
+      <div class="mb-3">
+        <label class="form-label fw-semibold">ชั้น</label>
+        <input type="number" name="floor" class="form-control"
+               value="{{ room.floor if room and room.floor else '' }}" placeholder="เช่น 1, 2, 3">
+      </div>
+      <div class="mb-3">
+        <label class="form-label fw-semibold">ค่าเช่า/เดือน (บาท) <span class="text-danger">*</span></label>
+        <input type="number" name="monthly_rent" class="form-control" required step="0.01"
+               value="{{ room.monthly_rent if room else '' }}" placeholder="เช่น 3500">
+      </div>
+      <div class="mb-3">
+        <label class="form-label fw-semibold">สถานะ</label>
+        <select name="status" class="form-select">
+          <option value="vacant" {{ 'selected' if room and room.status == 'vacant' }}>ว่าง</option>
+          <option value="occupied" {{ 'selected' if room and room.status == 'occupied' }}>มีผู้เช่า</option>
+        </select>
+      </div>
+      <div class="mb-4">
+        <label class="form-label fw-semibold">หมายเหตุ</label>
+        <input type="text" name="description" class="form-control"
+               value="{{ room.description if room else '' }}" placeholder="รายละเอียดเพิ่มเติม">
+      </div>
+      <button type="submit" class="btn btn-primary">
+        <i class="bi bi-check-lg me-1"></i>บันทึก
+      </button>
+      <a href="/rooms" class="btn btn-outline-secondary ms-2">ยกเลิก</a>
+    </form>
+  </div>
+</div>
+{% endblock %}
