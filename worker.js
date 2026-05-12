@@ -1,4 +1,5 @@
 export default {
+  // v15.4.2.39: Monthly archive index summary fix + auto repair for old index rows
   async fetch(request, env, ctx) {
     const requestOrigin = request.headers.get('Origin') || '';
     const allowedOrigins = String(env.ADMIN_ORIGIN || env.ALLOWED_ORIGINS || '')
@@ -1261,14 +1262,57 @@ export default {
 
       const monthlyArchiveIndexObj = safeJsonParse(monthlyArchiveIndex, {});
       const monthlyArchives = {};
+      let monthlyArchiveIndexNeedsRepair = false;
       try {
         const archiveKeys = Object.keys(monthlyArchiveIndexObj || {});
         const archiveValues = await Promise.all(
           archiveKeys.map(k => env.DB.get('monthlyArchive:' + k))
         );
         archiveKeys.forEach((k, idx) => {
-          monthlyArchives[k] = safeJsonParse(archiveValues[idx], null);
+          const archive = safeJsonParse(archiveValues[idx], null);
+          monthlyArchives[k] = archive;
+
+          // v15.4.2.39: ซ่อม index เก่าที่เคยเก็บ paidCount / vacantCount / totalRooms ไม่ครบ
+          if (archive && typeof archive === 'object') {
+            const indexRow = monthlyArchiveIndexObj[k] || {};
+            const summary = archive.summary || {};
+            const roomsSummary = Array.isArray(archive.roomsSummary) ? archive.roomsSummary : [];
+            const totalRoomsFromArchive = roomsSummary.length
+              || Object.keys(archive.rooms || {}).filter(roomKey => String(roomKey) !== '99').length
+              || Number(summary.totalRooms || summary.roomCount || 0);
+            const paidCountFromArchive = Number(summary.paidCount || 0);
+            const unpaidCountFromArchive = Number(summary.unpaidCount || 0);
+            const vacantCountFromArchive = Number(summary.vacantCount || 0);
+
+            const repairedRow = {
+              ...indexRow,
+              totalRooms: Number(indexRow.totalRooms || indexRow.roomCount || totalRoomsFromArchive || (paidCountFromArchive + unpaidCountFromArchive + vacantCountFromArchive) || 0),
+              roomCount: Number(indexRow.roomCount || indexRow.totalRooms || totalRoomsFromArchive || (paidCountFromArchive + unpaidCountFromArchive + vacantCountFromArchive) || 0),
+              paidCount: indexRow.paidCount != null ? Number(indexRow.paidCount || 0) : paidCountFromArchive,
+              unpaidCount: indexRow.unpaidCount != null ? Number(indexRow.unpaidCount || 0) : unpaidCountFromArchive,
+              vacantCount: indexRow.vacantCount != null ? Number(indexRow.vacantCount || 0) : vacantCountFromArchive,
+              unpaidTotal: indexRow.unpaidTotal != null ? Number(indexRow.unpaidTotal || 0) : Number(summary.unpaidTotal || 0),
+              paymentCount: indexRow.paymentCount != null ? Number(indexRow.paymentCount || 0) : Number(summary.paymentCount || 0),
+              paidAmount: indexRow.paidAmount != null ? Number(indexRow.paidAmount || 0) : Number(summary.paidAmount || 0),
+              receivedTotal: indexRow.receivedTotal != null ? Number(indexRow.receivedTotal || 0) : Number(summary.paidAmount || 0),
+            };
+
+            const keyFields = ['totalRooms','roomCount','paidCount','unpaidCount','vacantCount','unpaidTotal','paymentCount','paidAmount','receivedTotal'];
+            const changed = keyFields.some(field => String(indexRow[field] ?? '') !== String(repairedRow[field] ?? ''));
+            if (changed) {
+              monthlyArchiveIndexObj[k] = repairedRow;
+              monthlyArchiveIndexNeedsRepair = true;
+            }
+          }
         });
+        if (monthlyArchiveIndexNeedsRepair) {
+          ctx.waitUntil(putKVJson('monthlyArchiveIndex', monthlyArchiveIndexObj));
+          ctx.waitUntil(logEvent({
+            action: 'repairMonthlyArchiveIndex',
+            message: 'Monthly archive index summary repaired from full archive data',
+            extra: { repairedKeys: archiveKeys },
+          }));
+        }
       } catch (_) {}
 
       const parsedMonthClosuresForCycle = safeJsonParse(monthClosures, {});
@@ -1684,10 +1728,27 @@ export default {
         paymentMonthText: archive.paymentMonthText || archive.monthText || monthKey,
         archivedAt: archive.archivedAt || new Date().toISOString(),
         archivedAtText: archive.archivedAtText || thTime(),
+        totalRooms: Number(
+          archive.summary?.totalRooms
+          || archive.summary?.roomCount
+          || (Array.isArray(archive.roomsSummary) ? archive.roomsSummary.length : 0)
+          || Object.keys(archive.rooms || {}).filter(roomKey => String(roomKey) !== '99').length
+          || 0
+        ),
+        roomCount: Number(
+          archive.summary?.roomCount
+          || archive.summary?.totalRooms
+          || (Array.isArray(archive.roomsSummary) ? archive.roomsSummary.length : 0)
+          || Object.keys(archive.rooms || {}).filter(roomKey => String(roomKey) !== '99').length
+          || 0
+        ),
+        paidCount: Number(archive.summary?.paidCount || 0),
         unpaidCount: Number(archive.summary?.unpaidCount || 0),
+        vacantCount: Number(archive.summary?.vacantCount || 0),
         unpaidTotal: Number(archive.summary?.unpaidTotal || 0),
         paymentCount: Number(archive.summary?.paymentCount || 0),
         paidAmount: Number(archive.summary?.paidAmount || 0),
+        receivedTotal: Number(archive.summary?.paidAmount || archive.summary?.receivedTotal || 0),
         savedAt: new Date().toISOString(),
         savedAtText: thTime(),
       };
