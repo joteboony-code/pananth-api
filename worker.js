@@ -1,4 +1,4 @@
-// v15.4.2.55: tenant LINE OA broadcast announcements + activity logs
+// v15.4.2.56: LIFF Tenant Portal API with LINE ID token verification
 export default {
   // v15.4.2.42: Tenant profile / document center + monthly archive index fix
   async fetch(request, env, ctx) {
@@ -808,7 +808,7 @@ export default {
       const values = await Promise.all(keys.map(k => env.DB.get(k)));
       const backup = {
         app: 'pananth-rental',
-        version: 'v15.4.2.55',
+        version: 'v15.4.2.56',
         backupType,
         reason,
         backupId,
@@ -1643,6 +1643,250 @@ export default {
         await logEvent({ level: 'warn', action: 'lineSignature', message: 'Rejected LINE webhook: invalid signature' });
         return textResponse('Invalid LINE signature', 401);
       }
+    } else if (body.action === 'getTenantPortalData') {
+      const idToken = String(body.idToken || '').trim();
+      const lineLoginChannelId = String(env.LINE_LOGIN_CHANNEL_ID || '').trim();
+
+      if (!idToken) {
+        return jsonResponse({ ok: false, error: 'ไม่พบ LINE ID Token' }, 401);
+      }
+      if (!lineLoginChannelId) {
+        return jsonResponse({ ok: false, error: 'ยังไม่ได้ตั้งค่า LINE_LOGIN_CHANNEL_ID ใน Worker' }, 500);
+      }
+
+      let verifyResponse;
+      let verified = {};
+      try {
+        const verifyBody = new URLSearchParams();
+        verifyBody.set('id_token', idToken);
+        verifyBody.set('client_id', lineLoginChannelId);
+        verifyResponse = await fetch('https://api.line.me/oauth2/v2.1/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: verifyBody,
+        });
+        verified = await verifyResponse.json().catch(() => ({}));
+      } catch (err) {
+        await logEvent({ level: 'error', action: 'tenantPortalVerifyToken', message: err?.message || String(err) });
+        return jsonResponse({ ok: false, error: 'ตรวจสอบ LINE ID Token ไม่สำเร็จ' }, 502);
+      }
+
+      if (!verifyResponse?.ok || !verified?.sub) {
+        return jsonResponse({
+          ok: false,
+          error: verified?.error_description || verified?.error || 'LINE ID Token ไม่ถูกต้องหรือหมดอายุ',
+        }, 401);
+      }
+
+      const lineUserId = String(verified.sub || '').trim();
+      const [configRaw, roomsRaw, tenantsRaw, tenantProfilesRaw, arrearsRaw, paymentHistoryRaw, monthlyArchiveIndexRaw] = await Promise.all([
+        getKVJson('config', {}),
+        getKVJson('rooms', {}),
+        getKVJson('tenants', {}),
+        getKVJson('tenantProfiles', {}),
+        getKVJson('arrears', {}),
+        getKVJson('paymentHistory', []),
+        getKVJson('monthlyArchiveIndex', {}),
+      ]);
+
+      const cfg = sanitizeConfig(configRaw || {});
+      const rooms = roomsRaw && typeof roomsRaw === 'object' ? roomsRaw : {};
+      const tenants = tenantsRaw && typeof tenantsRaw === 'object' ? tenantsRaw : {};
+      const tenantProfiles = normalizeTenantProfilesMap(tenantProfilesRaw || {});
+      const arrears = arrearsRaw && typeof arrearsRaw === 'object' ? arrearsRaw : {};
+      const paymentHistory = Array.isArray(paymentHistoryRaw) ? paymentHistoryRaw : [];
+      const monthlyArchiveIndex = monthlyArchiveIndexRaw && typeof monthlyArchiveIndexRaw === 'object'
+        ? monthlyArchiveIndexRaw
+        : {};
+      const billingMeta = getBillingMetaFromConfig(cfg);
+
+      const matchedRoomNums = Object.entries(cfg.userIds || {})
+        .filter(([, userId]) => String(userId || '').trim() === lineUserId)
+        .map(([roomNum]) => String(parseInt(roomNum || 0, 10) || '').trim())
+        .filter(roomNum => roomNum && isValidRoomNum(roomNum) && !isTestRoom(roomNum))
+        .sort((a, b) => Number(a) - Number(b));
+
+      const portalMonthCutoffKey = (dateText = '') => {
+        const m = String(dateText || '').trim().match(/^(\d{4})-(\d{2})-\d{2}/);
+        return m ? `${m[1]}-${m[2]}` : '';
+      };
+
+      const portalDateToMs = (dateText = '') => {
+        const value = String(dateText || '').trim();
+        if (!value) return 0;
+        const ms = Date.parse(value.includes('T') ? value : value + 'T00:00:00+07:00');
+        return Number.isFinite(ms) ? ms : 0;
+      };
+
+      const portalPaymentAfterCutoff = (payment = {}, cutoffMs = 0) => {
+        if (!cutoffMs) return false;
+        const paidMs = portalDateToMs(payment.paidAt || payment.createdAt || '');
+        return paidMs >= cutoffMs;
+      };
+
+      const portalArchiveAfterCutoff = (monthKey = '', cutoffMonthKey = '') => {
+        if (!cutoffMonthKey) return false;
+        return String(monthKey || '') >= String(cutoffMonthKey || '');
+      };
+
+      const archiveKeys = Object.keys(monthlyArchiveIndex || {})
+        .filter(key => /^\d{4}-\d{2}$/.test(key))
+        .sort()
+        .reverse()
+        .slice(0, 24);
+
+      const archivePairs = await Promise.all(
+        archiveKeys.map(async monthKey => [monthKey, await getKVJson('monthlyArchive:' + monthKey, null)])
+      );
+      const archiveMap = Object.fromEntries(archivePairs.filter(([, archive]) => archive && typeof archive === 'object'));
+
+      const methodText = (method = '') => {
+        const raw = String(method || '').trim();
+        const map = {
+          manual: 'รับชำระเอง',
+          cash: 'เงินสด',
+          offline_transfer: 'โอนนอกระบบ',
+          transfer_unverified: 'โอนแต่ระบบตรวจไม่ได้',
+          bank_transfer: 'โอนเงิน',
+          transfer: 'โอนเงิน',
+          slip2go: 'ตรวจสลิปผ่าน',
+          slip: 'ตรวจสลิปผ่าน',
+        };
+        return map[raw] || raw || '-';
+      };
+
+      const portalRooms = matchedRoomNums.map(roomNum => {
+        const room = rooms?.[roomNum] || rooms?.[Number(roomNum)] || {};
+        const profile = tenantProfiles?.[roomNum] || {};
+        const tenant = tenants?.[roomNum] || tenants?.[Number(roomNum)] || {};
+        const rent = getRoomRentValue(roomNum, room, cfg);
+        const trash = getRoomTrashValue(roomNum, room, cfg);
+        const electricUnits = Math.max(0, (Number(room.ec) || 0) - (Number(room.ep) || 0));
+        const waterUnits = Math.max(0, (Number(room.wc) || 0) - (Number(room.wp) || 0));
+        const electricAmount = electricUnits * 8;
+        const waterAmount = waterUnits * 35;
+        const wifi = Number(room.wifi || 0) || 0;
+        const expected = room?.vacant ? 0 : calcExpectedAmount(roomNum, room, cfg);
+        const currentPaid = room?.vacant ? 0 : (room?.paid ? expected : (Number(room.manualPaidAmount || 0) || 0));
+        const currentRemaining = room?.vacant ? 0 : (room?.paid ? 0 : Math.max(0, expected - currentPaid));
+        const arrearsList = (Array.isArray(arrears?.[roomNum]) ? arrears[roomNum] : [])
+          .filter(item => Math.max(0, Number(item?.remaining) || 0) > 0)
+          .map(item => ({
+            monthKey: String(item.monthKey || ''),
+            monthText: String(item.monthText || ''),
+            originalAmount: Number(item.originalAmount || 0) || 0,
+            paidAmount: Number(item.paidAmount || 0) || 0,
+            remaining: Math.max(0, Number(item.remaining) || 0),
+            status: String(item.status || 'unpaid'),
+          }));
+        const arrearsTotal = arrearsList.reduce((sum, item) => sum + Number(item.remaining || 0), 0);
+        const totalRemaining = currentRemaining + arrearsTotal;
+        const status = room?.vacant
+          ? 'vacant'
+          : (currentRemaining <= 0 ? 'paid' : (currentPaid > 0 ? 'partial' : 'unpaid'));
+
+        const historyCutoffDate = String(profile.moveInDate || profile.contractStart || '').trim();
+        const historyCutoffMs = portalDateToMs(historyCutoffDate);
+        const historyCutoffMonthKey = portalMonthCutoffKey(historyCutoffDate);
+        const historyCutoffText = historyCutoffDate || '';
+
+        const historyPayments = historyCutoffMs
+          ? paymentHistory
+              .filter(p => String(p.roomNum || p.room || '').trim() === roomNum)
+              .filter(p => portalPaymentAfterCutoff(p, historyCutoffMs))
+              .slice()
+              .reverse()
+              .slice(0, 12)
+              .map(p => ({
+                amount: Number(p.amount || p.appliedTotal || 0) || 0,
+                paidAt: String(p.paidAt || p.createdAt || ''),
+                paidAtText: String(p.paidAtText || p.createdAtText || p.paidAt || p.createdAt || ''),
+                method: String(p.method || p.source || ''),
+                methodText: methodText(p.method || p.source || ''),
+                status: String(p.status || ''),
+              }))
+          : [];
+
+        const historyArchives = historyCutoffMonthKey
+          ? archiveKeys
+              .filter(monthKey => portalArchiveAfterCutoff(monthKey, historyCutoffMonthKey))
+              .map(monthKey => {
+                const archive = archiveMap[monthKey] || {};
+                const rows = Array.isArray(archive.roomsSummary) ? archive.roomsSummary : [];
+                const row = rows.find(item => String(item.roomNum || '').trim() === roomNum);
+                if (!row) return null;
+                const monthFullTotal = Number(row.monthFullTotal || 0) || 0;
+                const received = Number(row.receivedAtClose || row.manualPaidAmount || 0) || 0;
+                const remaining = Number(row.remainingAtClose || row.manualRemaining || 0) || 0;
+                return {
+                  monthKey,
+                  monthText: String(archive.monthText || monthKey),
+                  billingMonthText: String(archive.billingMonthText || archive.monthText || monthKey),
+                  paymentMonthText: String(archive.paymentMonthText || ''),
+                  monthFullTotal,
+                  received,
+                  remaining,
+                  status: row.vacant ? 'vacant' : (remaining <= 0 ? 'paid' : (received > 0 ? 'partial' : 'unpaid')),
+                };
+              })
+              .filter(Boolean)
+              .slice(0, 8)
+          : [];
+
+        return {
+          roomNum,
+          tenantName: String(profile.fullName || tenant.name || '').trim(),
+          status,
+          billingMeta,
+          meters: {
+            ep: Number(room.ep || 0) || 0,
+            ec: Number(room.ec || 0) || 0,
+            wp: Number(room.wp || 0) || 0,
+            wc: Number(room.wc || 0) || 0,
+          },
+          amounts: {
+            rent,
+            trash,
+            wifi,
+            electricRate: 8,
+            electricUnits,
+            electricAmount,
+            waterRate: 35,
+            waterUnits,
+            waterAmount,
+            expected,
+            currentPaid,
+            currentRemaining,
+            arrearsTotal,
+            totalRemaining,
+          },
+          arrears: arrearsList,
+          history: {
+            historyCutoffDate,
+            historyCutoffText,
+            payments: historyPayments,
+            archives: historyArchives,
+          },
+        };
+      });
+
+      const totals = portalRooms.reduce((acc, room) => {
+        acc.totalCurrentRemaining += Number(room?.amounts?.currentRemaining || 0);
+        acc.totalArrears += Number(room?.amounts?.arrearsTotal || 0);
+        acc.totalOutstanding += Number(room?.amounts?.totalRemaining || 0);
+        return acc;
+      }, { totalCurrentRemaining: 0, totalArrears: 0, totalOutstanding: 0 });
+
+      return jsonResponse({
+        ok: true,
+        user: {
+          displayName: String(verified.name || '').trim(),
+          pictureUrl: String(verified.picture || '').trim(),
+        },
+        roomCount: portalRooms.length,
+        totals,
+        rooms: portalRooms,
+      });
     } else {
       // savePin อนุญาตเฉพาะกรณีตั้ง PIN ครั้งแรก ถ้ามี PIN แล้วต้องผ่าน admin token
       if (body.action === 'savePin') {
@@ -3593,6 +3837,7 @@ ${sentRooms.length ? '\n━━━━━━━━━━━━━━\n' + sentRoom
     },
   });
 }
+
 // ===== Cron แจ้งเตือนสัญญาใกล้หมดทาง LINE OA หาเจ้าของ =====
 async function runContractExpiryOwnerReminder(env) {
   const TOKEN = env.LINE_TOKEN;

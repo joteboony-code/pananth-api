@@ -93,3 +93,9 @@ https://white-rice-cf72.joteboony.workers.dev/
 - เพิ่ม action `sendTenantBroadcast` สำหรับส่งประกาศถึงผู้เช่าผ่าน LINE OA จากหน้าเว็บ
 - ระบบ dedupe LINE User ID อัตโนมัติ หากหลายห้องผูก LINE เดียวกัน
 - บันทึกผลการส่งเข้า Activity Log
+
+
+## v15.4.2.56 Tenant Portal API
+- เพิ่ม public action `getTenantPortalData`
+- ตรวจสอบ LIFF ID Token กับ LINE Verify ID Token API
+- ต้องตั้ง Worker variable `LINE_LOGIN_CHANNEL_ID`
