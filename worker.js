@@ -1,4 +1,4 @@
-// v15.4.2.58: tenant portal payment QR card asset added on frontend
+// v15.4.2.59: tenant portal return-to-LINE-chat button added on frontend
 export default {
   // v15.4.2.42: Tenant profile / document center + monthly archive index fix
   async fetch(request, env, ctx) {
@@ -808,7 +808,7 @@ export default {
       const values = await Promise.all(keys.map(k => env.DB.get(k)));
       const backup = {
         app: 'pananth-rental',
-        version: 'v15.4.2.58',
+        version: 'v15.4.2.59',
         backupType,
         reason,
         backupId,
