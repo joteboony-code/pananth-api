@@ -1,4 +1,4 @@
-// v15.4.2.51: system activity history records for key admin actions + tenant/document activity view
+// v15.4.2.53: contract expiry owner LINE alerts + rental agreement PDF download asset in frontend
 export default {
   // v15.4.2.42: Tenant profile / document center + monthly archive index fix
   async fetch(request, env, ctx) {
@@ -808,7 +808,7 @@ export default {
       const values = await Promise.all(keys.map(k => env.DB.get(k)));
       const backup = {
         app: 'pananth-rental',
-        version: 'v15.4.2.51',
+        version: 'v15.4.2.53',
         backupType,
         reason,
         backupId,
@@ -3150,7 +3150,10 @@ export default {
     return textResponse('Not Found', 404);
   },
     async scheduled(event, env, ctx) {
-    ctx.waitUntil(runAutoRentReminder(env));
+    ctx.waitUntil(Promise.allSettled([
+      runAutoRentReminder(env),
+      runContractExpiryOwnerReminder(env),
+    ]));
   },
 };
 
@@ -3312,10 +3315,6 @@ async function runAutoRentReminder(env) {
   const reminderDays = config.reminderDays || [5, 10, 15, 20, 25];
 
   if (!reminderDays.includes(day)) {
-    await logEvent({
-      action: 'autoReminderSkipped',
-      message: 'Today is not reminder day: ' + day,
-    });
     return;
   }
 
@@ -3468,4 +3467,240 @@ ${sentRooms.length ? '\n━━━━━━━━━━━━━━\n' + sentRoom
       totalAmount,
     },
   });
+}
+// ===== Cron แจ้งเตือนสัญญาใกล้หมดทาง LINE OA หาเจ้าของ =====
+async function runContractExpiryOwnerReminder(env) {
+  const TOKEN = env.LINE_TOKEN;
+  const OWNER_ID = env.OWNER_ID;
+
+  const safeJsonParse = (text, fallback) => {
+    try { return text ? JSON.parse(text) : fallback; }
+    catch (_) { return fallback; }
+  };
+
+  const getKVJson = async (key, fallback) =>
+    safeJsonParse(await env.DB.get(key), fallback);
+
+  const putKVJson = async (key, data) =>
+    env.DB.put(key, JSON.stringify(data));
+
+  const getBangkokToday = () => {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Bangkok',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(new Date());
+    const map = Object.fromEntries(parts.map(p => [p.type, p.value]));
+    const year = Number(map.year);
+    const month = Number(map.month);
+    const day = Number(map.day);
+    return {
+      key: `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`,
+      utcDate: new Date(Date.UTC(year, month - 1, day)),
+      year,
+      month,
+      day,
+    };
+  };
+
+  const parseIsoDate = (value = '') => {
+    const m = String(value || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (!m) return null;
+    const year = Number(m[1]);
+    const month = Number(m[2]);
+    const day = Number(m[3]);
+    if (!year || !month || !day) return null;
+    const date = new Date(Date.UTC(year, month - 1, day));
+    if (date.getUTCFullYear() !== year || date.getUTCMonth() + 1 !== month || date.getUTCDate() !== day) return null;
+    return { raw: `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`, utcDate: date };
+  };
+
+  const formatThaiDate = (iso = '') => {
+    const parsed = parseIsoDate(iso);
+    if (!parsed) return String(iso || '-');
+    try {
+      return parsed.utcDate.toLocaleDateString('th-TH', {
+        timeZone: 'UTC',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+      });
+    } catch (_) {
+      return parsed.raw;
+    }
+  };
+
+  const thTime = (d = new Date()) =>
+    new Date(d).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' });
+
+  const pushLine = async (to, text) => {
+    if (!TOKEN || !to || !text) return { ok: false, error: 'Missing token/to/text' };
+    const res = await fetch('https://api.line.me/v2/bot/message/push', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer ' + TOKEN,
+      },
+      body: JSON.stringify({
+        to,
+        messages: [{ type: 'text', text }],
+      }),
+    });
+    let result = {};
+    try { result = await res.json(); } catch (_) {}
+    return { ok: res.ok, status: res.status, result };
+  };
+
+  const logEvent = async ({
+    level = 'info',
+    action = 'contractExpiryReminder',
+    message = '',
+    roomNum = '',
+    extra = {},
+  }) => {
+    try {
+      const logs = await getKVJson('logs', []);
+      logs.push({
+        time: new Date().toISOString(),
+        timeText: thTime(),
+        level,
+        action,
+        message: String(message || ''),
+        roomNum,
+        extra,
+      });
+      while (logs.length > 200) logs.shift();
+      await putKVJson('logs', logs);
+    } catch (_) {}
+  };
+
+  const [tenantProfiles, rooms, configRaw, alertHistoryRaw] = await Promise.all([
+    getKVJson('tenantProfiles', {}),
+    getKVJson('rooms', {}),
+    getKVJson('config', {}),
+    getKVJson('contractExpiryAlerts', {}),
+  ]);
+
+  const config = configRaw && typeof configRaw === 'object' ? configRaw : {};
+  const alertHistory = alertHistoryRaw && typeof alertHistoryRaw === 'object' ? alertHistoryRaw : {};
+  const roomSettings = config.roomSettings && typeof config.roomSettings === 'object' ? config.roomSettings : {};
+  const today = getBangkokToday();
+
+  const buckets = { d30: [], d7: [], expired: [] };
+
+  for (const [profileKey, profileRaw] of Object.entries(tenantProfiles || {})) {
+    const profile = profileRaw && typeof profileRaw === 'object' ? profileRaw : {};
+    const roomNum = String(parseInt(profile.roomNum || profile.room || profileKey || 0, 10) || '').trim();
+    if (!roomNum || roomNum === '99') continue;
+
+    const room = rooms?.[roomNum] || rooms?.[String(roomNum)] || {};
+    const roomSetting = roomSettings?.[roomNum] || roomSettings?.[String(roomNum)] || {};
+    if (room?.vacant) continue;
+    if (String(roomSetting?.status || '').trim() === 'vacant') continue;
+    if (String(roomSetting?.status || '').trim() === 'disabled') continue;
+
+    const contractEnd = parseIsoDate(profile.contractEnd || '');
+    if (!contractEnd) continue;
+
+    const daysLeft = Math.round((contractEnd.utcDate.getTime() - today.utcDate.getTime()) / 86400000);
+    let threshold = '';
+    let statusText = '';
+    if (daysLeft === 30) {
+      threshold = '30';
+      statusText = 'เหลือ 30 วัน';
+    } else if (daysLeft === 7) {
+      threshold = '7';
+      statusText = 'เหลือ 7 วัน';
+    } else if (daysLeft <= 0) {
+      threshold = 'expired';
+      statusText = daysLeft === 0 ? 'หมดสัญญาวันนี้' : `หมดสัญญาแล้ว ${Math.abs(daysLeft).toLocaleString('th-TH')} วัน`;
+    } else {
+      continue;
+    }
+
+    const alertKey = `${roomNum}|${contractEnd.raw}|${threshold}`;
+    if (alertHistory[alertKey]) continue;
+
+    const item = {
+      roomNum,
+      tenantName: String(profile.fullName || profile.name || '').trim(),
+      contractEnd: contractEnd.raw,
+      contractEndText: formatThaiDate(contractEnd.raw),
+      daysLeft,
+      threshold,
+      statusText,
+      alertKey,
+    };
+
+    if (threshold === '30') buckets.d30.push(item);
+    else if (threshold === '7') buckets.d7.push(item);
+    else buckets.expired.push(item);
+  }
+
+  const total = buckets.d30.length + buckets.d7.length + buckets.expired.length;
+  if (!total) return;
+
+  const renderBucket = (title, rows = []) => {
+    if (!rows.length) return '';
+    return `\n${title}\n` + rows.map(item =>
+      `• ห้อง ${item.roomNum}${item.tenantName ? ' - ' + item.tenantName : ''}\n  สิ้นสุด ${item.contractEndText} • ${item.statusText}`
+    ).join('\n');
+  };
+
+  const message =
+`📌 แจ้งเตือนสัญญาเช่าใกล้หมด / หมดสัญญา
+วันที่ตรวจ ${today.key}
+
+${renderBucket('⏳ เหลือ 30 วัน', buckets.d30)}${renderBucket('⚠️ เหลือ 7 วัน', buckets.d7)}${renderBucket('🚨 หมดสัญญาแล้ว', buckets.expired)}
+
+รวม ${total.toLocaleString('th-TH')} รายการ`;
+
+  try {
+    const result = await pushLine(OWNER_ID, message);
+    if (!result.ok) {
+      await logEvent({
+        level: 'error',
+        action: 'contractExpiryReminderFailed',
+        message: 'Contract expiry owner LINE push failed',
+        extra: { status: result.status || 0, result: result.result || {}, total },
+      });
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    const nowText = thTime();
+    for (const item of [...buckets.d30, ...buckets.d7, ...buckets.expired]) {
+      alertHistory[item.alertKey] = {
+        sentAt: nowIso,
+        sentAtText: nowText,
+        roomNum: item.roomNum,
+        tenantName: item.tenantName,
+        contractEnd: item.contractEnd,
+        threshold: item.threshold,
+        daysLeft: item.daysLeft,
+      };
+    }
+    await putKVJson('contractExpiryAlerts', alertHistory);
+
+    await logEvent({
+      action: 'contractExpiryReminderSent',
+      message: 'ส่ง LINE แจ้งเจ้าของเรื่องสัญญาใกล้หมด/หมดสัญญาแล้ว',
+      roomNum: total === 1 ? ([...buckets.d30, ...buckets.d7, ...buckets.expired][0]?.roomNum || '') : '',
+      extra: {
+        count30: buckets.d30.length,
+        count7: buckets.d7.length,
+        countExpired: buckets.expired.length,
+        total,
+        rooms: [...buckets.d30, ...buckets.d7, ...buckets.expired].map(item => item.roomNum),
+      },
+    });
+  } catch (err) {
+    await logEvent({
+      level: 'error',
+      action: 'contractExpiryReminderError',
+      message: err?.message || String(err),
+      extra: { total },
+    });
+  }
 }

@@ -81,3 +81,9 @@ https://white-rice-cf72.joteboony.workers.dev/
 ```
 
 ถ้าภายหลังเปลี่ยนชื่อ Worker เป็น `pananth-api` ต้องแก้ `name` ใน `wrangler.toml`, แก้ API URL ใน `index.html`, และแก้ LINE Webhook URL ตามไปด้วย
+
+
+## v15.4.2.53
+- Cron เปลี่ยนเป็นรันทุกวัน 09:00 ไทย
+- แจ้งเตือนค่าเช่ายังคุมวันเดิมในโค้ด
+- เพิ่มแจ้งเตือนสัญญาใกล้หมด/หมดสัญญาแล้วทาง LINE OA หาเจ้าของ
