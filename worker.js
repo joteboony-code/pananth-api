@@ -1,3 +1,4 @@
+// v15.4.2.46: tenant move-out archive, tenant profile history retention, contract/deposit support
 export default {
   // v15.4.2.42: Tenant profile / document center + monthly archive index fix
   async fetch(request, env, ctx) {
@@ -338,6 +339,57 @@ export default {
       };
     };
 
+    const normalizeTenantHistoryEntry = (entry = {}, index = 0) => {
+      if (!entry || typeof entry !== 'object') return null;
+      const documents = Array.isArray(entry.documents)
+        ? entry.documents.map(normalizeTenantDocumentMeta).filter(Boolean).slice(-200)
+        : [];
+      const checkoutRaw = entry.checkout && typeof entry.checkout === 'object' ? entry.checkout : {};
+      const diffAmount = tenantSafeNumber(checkoutRaw.diffAmount ?? checkoutRaw.diff ?? 0, 0);
+      const isRefund = checkoutRaw.isRefund === true || String(checkoutRaw.isRefund || '').toLowerCase() === 'true';
+      return {
+        id: tenantSafeText(entry.id || `history-${tenantSafeText(entry.archivedAt || '', 80)}-${index}`, 120),
+        fullName: tenantSafeText(entry.fullName || entry.name || '', 180),
+        phone: tenantSafeText(entry.phone || '', 80),
+        idCardNumber: tenantSafeText(entry.idCardNumber || entry.idCard || '', 60),
+        birthDate: tenantSafeText(entry.birthDate || '', 30),
+        occupation: tenantSafeText(entry.occupation || '', 120),
+        workplace: tenantSafeText(entry.workplace || '', 180),
+        registeredAddress: tenantSafeText(entry.registeredAddress || entry.address || '', 700),
+        emergencyName: tenantSafeText(entry.emergencyName || '', 180),
+        emergencyRelation: tenantSafeText(entry.emergencyRelation || '', 100),
+        emergencyPhone: tenantSafeText(entry.emergencyPhone || '', 80),
+        contractStart: tenantSafeText(entry.contractStart || '', 30),
+        contractEnd: tenantSafeText(entry.contractEnd || '', 30),
+        deposit: tenantSafeNumber(entry.deposit || 0, 0),
+        moveInDate: tenantSafeText(entry.moveInDate || '', 30),
+        moveOutDate: tenantSafeText(entry.moveOutDate || checkoutRaw.moveOutDate || '', 30),
+        profileNote: tenantSafeText(entry.profileNote || entry.note || '', 1000),
+        documents,
+        archivedAt: tenantSafeText(entry.archivedAt || '', 80),
+        archivedAtText: tenantSafeText(entry.archivedAtText || '', 120),
+        archiveReason: tenantSafeText(entry.archiveReason || 'checkout', 80),
+        checkout: {
+          deposit: tenantSafeNumber(checkoutRaw.deposit || 0, 0),
+          rent: tenantSafeNumber(checkoutRaw.rent || 0, 0),
+          trash: tenantSafeNumber(checkoutRaw.trash || 0, 0),
+          elecAmount: tenantSafeNumber(checkoutRaw.elecAmount || 0, 0),
+          waterAmount: tenantSafeNumber(checkoutRaw.waterAmount || 0, 0),
+          wifi: tenantSafeNumber(checkoutRaw.wifi || 0, 0),
+          cleaningFee: tenantSafeNumber(checkoutRaw.cleaningFee || checkoutRaw.clean || 0, 0),
+          damageFee: tenantSafeNumber(checkoutRaw.damageFee || checkoutRaw.damage || 0, 0),
+          totalBill: tenantSafeNumber(checkoutRaw.totalBill || 0, 0),
+          diffAmount,
+          isRefund,
+          note: tenantSafeText(checkoutRaw.note || '', 1000),
+          checkoutAt: tenantSafeText(checkoutRaw.checkoutAt || '', 80),
+          checkoutAtText: tenantSafeText(checkoutRaw.checkoutAtText || '', 120),
+        },
+        createdAt: tenantSafeText(entry.createdAt || '', 80),
+        updatedAt: tenantSafeText(entry.updatedAt || '', 80),
+      };
+    };
+
     const normalizeTenantProfile = (profile = {}, roomNum = '') => {
       const room = String(parseInt(profile.roomNum || profile.room || roomNum || 0, 10) || '').trim();
       const docs = Array.isArray(profile.documents)
@@ -361,6 +413,9 @@ export default {
         moveInDate: tenantSafeText(profile.moveInDate || '', 30),
         profileNote: tenantSafeText(profile.profileNote || profile.note || '', 1000),
         documents: docs,
+        history: Array.isArray(profile.history)
+          ? profile.history.map(normalizeTenantHistoryEntry).filter(Boolean).slice(-120)
+          : [],
         createdAt: tenantSafeText(profile.createdAt || '', 80),
         updatedAt: tenantSafeText(profile.updatedAt || '', 80),
       };
@@ -753,7 +808,7 @@ export default {
       const values = await Promise.all(keys.map(k => env.DB.get(k)));
       const backup = {
         app: 'pananth-rental',
-        version: 'v15.4.2.42',
+        version: 'v15.4.2.46',
         backupType,
         reason,
         backupId,
