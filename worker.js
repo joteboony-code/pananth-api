@@ -1,5 +1,5 @@
 export default {
-  // v15.4.2.39: Monthly archive index summary fix + auto repair for old index rows
+  // v15.4.2.42: Tenant profile / document center + monthly archive index fix
   async fetch(request, env, ctx) {
     const requestOrigin = request.headers.get('Origin') || '';
     const allowedOrigins = String(env.ADMIN_ORIGIN || env.ALLOWED_ORIGINS || '')
@@ -36,6 +36,26 @@ export default {
     // เก็บ Auto Backup ประมาณ 6 เดือน ถ้าไม่ได้ตั้งค่าใน Variables จะใช้ 180 วัน
     const R2_AUTO_BACKUP_RETENTION_DAYS = Math.max(1, Math.min(3650, Number(env.R2_AUTO_BACKUP_RETENTION_DAYS || 180)));
     const R2_AUTO_BACKUP_PREFIX = 'backups/auto/';
+    // ===== TENANT PROFILE / DOCUMENT STORAGE =====
+    const TENANT_DOCUMENT_PREFIX = 'tenant-documents/';
+    const MAX_TENANT_DOCUMENT_BYTES = 8 * 1024 * 1024;
+    const TENANT_DOCUMENT_ALLOWED_MIME = new Set([
+      'image/jpeg',
+      'image/png',
+      'image/webp',
+      'application/pdf',
+    ]);
+    const TENANT_DOCUMENT_TYPES = new Set([
+      'contract',
+      'id_front',
+      'id_back',
+      'house_registration',
+      'deposit_receipt',
+      'tenant_photo',
+      'vehicle_registration',
+      'guarantor_doc',
+      'other',
+    ]);
 
     // ===== TEST ROOM 99 =====
     const TEST_ROOM_NUM = 99;
@@ -291,6 +311,108 @@ export default {
       return s || null;
     };
 
+    const tenantSafeText = (value = '', max = 500) =>
+      String(value ?? '').trim().slice(0, max);
+
+    const tenantSafeNumber = (value, fallback = 0) => {
+      const n = Number(value);
+      return Number.isFinite(n) ? Math.max(0, n) : fallback;
+    };
+
+    const normalizeTenantDocumentMeta = (doc = {}) => {
+      const key = tenantSafeText(doc.key || doc.objectKey || '', 420);
+      if (!key || !key.startsWith(TENANT_DOCUMENT_PREFIX) || key.includes('..')) return null;
+      const rawType = tenantSafeText(doc.type || doc.docType || 'other', 40);
+      const type = TENANT_DOCUMENT_TYPES.has(rawType) ? rawType : 'other';
+      const mimeType = tenantSafeText(doc.mimeType || doc.contentType || '', 80);
+      return {
+        id: tenantSafeText(doc.id || randomToken().slice(0, 20), 80),
+        type,
+        label: tenantSafeText(doc.label || '', 120),
+        key,
+        fileName: tenantSafeText(doc.fileName || doc.originalName || '', 180),
+        mimeType,
+        size: tenantSafeNumber(doc.size || 0, 0),
+        uploadedAt: tenantSafeText(doc.uploadedAt || '', 80),
+        uploadedAtText: tenantSafeText(doc.uploadedAtText || '', 120),
+      };
+    };
+
+    const normalizeTenantProfile = (profile = {}, roomNum = '') => {
+      const room = String(parseInt(profile.roomNum || profile.room || roomNum || 0, 10) || '').trim();
+      const docs = Array.isArray(profile.documents)
+        ? profile.documents.map(normalizeTenantDocumentMeta).filter(Boolean).slice(-200)
+        : [];
+      return {
+        roomNum: room,
+        fullName: tenantSafeText(profile.fullName || profile.name || '', 180),
+        phone: tenantSafeText(profile.phone || '', 80),
+        idCardNumber: tenantSafeText(profile.idCardNumber || profile.idCard || '', 60),
+        birthDate: tenantSafeText(profile.birthDate || '', 30),
+        occupation: tenantSafeText(profile.occupation || '', 120),
+        workplace: tenantSafeText(profile.workplace || '', 180),
+        registeredAddress: tenantSafeText(profile.registeredAddress || profile.address || '', 700),
+        emergencyName: tenantSafeText(profile.emergencyName || '', 180),
+        emergencyRelation: tenantSafeText(profile.emergencyRelation || '', 100),
+        emergencyPhone: tenantSafeText(profile.emergencyPhone || '', 80),
+        contractStart: tenantSafeText(profile.contractStart || '', 30),
+        contractEnd: tenantSafeText(profile.contractEnd || '', 30),
+        deposit: tenantSafeNumber(profile.deposit || 0, 0),
+        moveInDate: tenantSafeText(profile.moveInDate || '', 30),
+        profileNote: tenantSafeText(profile.profileNote || profile.note || '', 1000),
+        documents: docs,
+        createdAt: tenantSafeText(profile.createdAt || '', 80),
+        updatedAt: tenantSafeText(profile.updatedAt || '', 80),
+      };
+    };
+
+    const normalizeTenantProfilesMap = (input = {}) => {
+      const out = {};
+      for (const [key, profileRaw] of Object.entries(input || {})) {
+        const room = String(parseInt(profileRaw?.roomNum || profileRaw?.room || key || 0, 10) || '').trim();
+        if (!room || !isValidRoomNum(room)) continue;
+        out[room] = normalizeTenantProfile(profileRaw || {}, room);
+      }
+      return out;
+    };
+
+    const getTenantProfilesFromKV = async () =>
+      normalizeTenantProfilesMap(await getKVJson('tenantProfiles', {}));
+
+    const tenantDocumentExtFromMime = (mime = '') => {
+      if (mime === 'image/jpeg') return 'jpg';
+      if (mime === 'image/png') return 'png';
+      if (mime === 'image/webp') return 'webp';
+      if (mime === 'application/pdf') return 'pdf';
+      return 'bin';
+    };
+
+    const safeTenantFileName = (name = 'document') =>
+      tenantSafeText(name || 'document', 160)
+        .replace(/[\\/:*?"<>|]+/g, '-')
+        .replace(/\s+/g, '_')
+        .replace(/_+/g, '_')
+        .replace(/^[-_.]+|[-_.]+$/g, '')
+        || 'document';
+
+    const decodeBase64Bytes = (raw = '') => {
+      const cleaned = String(raw || '')
+        .replace(/^data:[^,]+,/, '')
+        .replace(/\s+/g, '');
+      if (!cleaned) return new Uint8Array(0);
+      const binary = atob(cleaned);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return bytes;
+    };
+
+    const assertSafeTenantDocumentKey = (key = '') => {
+      const safeKey = tenantSafeText(key || '', 420);
+      return safeKey.startsWith(TENANT_DOCUMENT_PREFIX) && !safeKey.includes('..')
+        ? safeKey
+        : '';
+    };
+
     const getKVJson = async (key, fallback) =>
       safeJsonParse(await env.DB.get(key), fallback);
 
@@ -448,7 +570,7 @@ export default {
         return 'Invalid backup data';
       }
       const restoreSchema = {
-        rooms: 'object', config: 'object', shopinfo: 'object', tenants: 'object', history: 'object',
+        rooms: 'object', config: 'object', shopinfo: 'object', tenants: 'object', tenantProfiles: 'object', history: 'object',
         paymentHistory: 'array', expenses: 'array', logs: 'array', slipRefs: 'object',
         monthClosures: 'object', lockedMonths: 'object', arrears: 'object', editHistory: 'array',
         monthlyArchiveIndex: 'object'
@@ -475,6 +597,7 @@ export default {
         ['config', {}],
         ['shopinfo', {}],
         ['tenants', {}],
+        ['tenantProfiles', {}],
         ['history', {}],
         ['paymentHistory', []],
         ['expenses', []],
@@ -491,7 +614,9 @@ export default {
       const restoredKeys = [];
       for (const [key, fallback] of allowed) {
         if (data[key] !== undefined) {
-          const value = key === 'config' ? sanitizeConfig(data[key] || {}) : data[key] ?? fallback;
+          const value = key === 'config'
+            ? sanitizeConfig(data[key] || {})
+            : (key === 'tenantProfiles' ? normalizeTenantProfilesMap(data[key] || {}) : data[key] ?? fallback);
           await putKVJson(key, value);
           restoredKeys.push(key);
         }
@@ -624,11 +749,11 @@ export default {
       const now = new Date();
       const pad = n => String(n).padStart(2, '0');
       const backupId = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-      const keys = ['rooms','config','shopinfo','tenants','history','paymentHistory','expenses','logs','slipRefs','monthClosures','lockedMonths','lastCloseBackup','arrears','editHistory','monthlyArchiveIndex'];
+      const keys = ['rooms','config','shopinfo','tenants','tenantProfiles','history','paymentHistory','expenses','logs','slipRefs','monthClosures','lockedMonths','lastCloseBackup','arrears','editHistory','monthlyArchiveIndex'];
       const values = await Promise.all(keys.map(k => env.DB.get(k)));
       const backup = {
         app: 'pananth-rental',
-        version: 'v15.4.2.36',
+        version: 'v15.4.2.42',
         backupType,
         reason,
         backupId,
@@ -641,7 +766,7 @@ export default {
       keys.forEach((k, idx) => {
         const fallback = k === 'paymentHistory' || k === 'expenses' || k === 'logs' || k === 'editHistory' ? [] : (k === 'lastCloseBackup' ? null : {});
         const parsed = safeJsonParse(values[idx], fallback);
-        backup[k] = k === 'config' ? sanitizeConfig(parsed || {}) : parsed;
+        backup[k] = k === 'config' ? sanitizeConfig(parsed || {}) : (k === 'tenantProfiles' ? normalizeTenantProfilesMap(parsed || {}) : parsed);
       });
 
       const cfgMeta = getBillingMetaFromConfig(backup.config || {});
@@ -1222,11 +1347,35 @@ export default {
         });
       }
 
+      const getUrl = new URL(request.url);
+      const getAction = String(getUrl.searchParams.get('action') || '').trim();
+      if (getAction === 'tenantDocument') {
+        if (!env.RENTAL_R2 || typeof env.RENTAL_R2.get !== 'function') {
+          return jsonResponse({ ok: false, error: 'ยังไม่ได้ผูก R2 Bucket Binding ชื่อ RENTAL_R2 กับ Worker' }, 500);
+        }
+        const key = assertSafeTenantDocumentKey(getUrl.searchParams.get('key') || '');
+        if (!key) return jsonResponse({ ok: false, error: 'Invalid tenant document key' }, 400);
+        const obj = await env.RENTAL_R2.get(key);
+        if (!obj) return jsonResponse({ ok: false, error: 'Document not found' }, 404);
+        const contentType = obj.httpMetadata?.contentType || obj.customMetadata?.mimeType || 'application/octet-stream';
+        const fileName = safeTenantFileName(obj.customMetadata?.originalName || key.split('/').pop() || 'tenant-document');
+        return new Response(obj.body, {
+          status: 200,
+          headers: {
+            ...headers,
+            'Content-Type': contentType,
+            'Cache-Control': 'private, no-store',
+            'Content-Disposition': `inline; filename="${fileName.replace(/"/g, '')}"`,
+          },
+        });
+      }
+
       const [
         rooms,
         config,
         shopinfo,
         tenants,
+        tenantProfiles,
         history,
         paymentHistory,
         expenses,
@@ -1245,6 +1394,7 @@ export default {
         env.DB.get('config'),
         env.DB.get('shopinfo'),
         env.DB.get('tenants'),
+        env.DB.get('tenantProfiles'),
         env.DB.get('history'),
         env.DB.get('paymentHistory'),
         env.DB.get('expenses'),
@@ -1333,6 +1483,7 @@ export default {
         billingMeta: normalizedCycle.billingMeta,
         shopinfo: safeJsonParse(shopinfo, {}),
         tenants: safeJsonParse(tenants, {}),
+        tenantProfiles: normalizeTenantProfilesMap(safeJsonParse(tenantProfiles, {})),
         history: safeJsonParse(history, {}),
         paymentHistory: safeJsonParse(paymentHistory, []),
         expenses: safeJsonParse(expenses, []),
@@ -1474,6 +1625,128 @@ export default {
     if (body.action === 'saveTenants') {
       await putKVJson('tenants', body.data || {});
       return textResponse('OK');
+    }
+
+    if (body.action === 'saveTenantProfiles') {
+      const tenantProfiles = normalizeTenantProfilesMap(body.data || {});
+      await putKVJson('tenantProfiles', tenantProfiles);
+      await logEvent({
+        action: 'saveTenantProfiles',
+        message: 'Tenant profiles saved',
+        extra: { rooms: Object.keys(tenantProfiles).length },
+      });
+      return jsonResponse({ ok: true, tenantProfiles });
+    }
+
+    if (body.action === 'uploadTenantDocument') {
+      if (!env.RENTAL_R2 || typeof env.RENTAL_R2.put !== 'function') {
+        return jsonResponse({ ok: false, error: 'ยังไม่ได้ผูก R2 Bucket Binding ชื่อ RENTAL_R2 กับ Worker' }, 500);
+      }
+
+      const roomNum = String(parseInt(body.roomNum || 0, 10) || '').trim();
+      if (!roomNum || !isValidRoomNum(roomNum)) {
+        return jsonResponse({ ok: false, error: 'Invalid room number' }, 400);
+      }
+
+      const rawType = tenantSafeText(body.docType || body.type || 'other', 40);
+      const docType = TENANT_DOCUMENT_TYPES.has(rawType) ? rawType : 'other';
+      const mimeType = tenantSafeText(body.mimeType || '', 80).toLowerCase();
+      if (!TENANT_DOCUMENT_ALLOWED_MIME.has(mimeType)) {
+        return jsonResponse({ ok: false, error: 'รองรับเฉพาะ JPG, PNG, WEBP และ PDF' }, 400);
+      }
+
+      let bytes;
+      try {
+        bytes = decodeBase64Bytes(body.base64 || body.data || '');
+      } catch (_) {
+        return jsonResponse({ ok: false, error: 'อ่านไฟล์ไม่สำเร็จ' }, 400);
+      }
+      if (!bytes || !bytes.byteLength) return jsonResponse({ ok: false, error: 'ไฟล์ว่างหรืออ่านไม่ได้' }, 400);
+      if (bytes.byteLength > MAX_TENANT_DOCUMENT_BYTES) {
+        return jsonResponse({ ok: false, error: 'ไฟล์ใหญ่เกิน 8 MB' }, 413);
+      }
+
+      const now = new Date();
+      const uploadedAt = now.toISOString();
+      const uploadedAtText = thTime(now);
+      const originalName = safeTenantFileName(body.fileName || 'tenant-document');
+      const ext = tenantDocumentExtFromMime(mimeType);
+      const objectKey = `${TENANT_DOCUMENT_PREFIX}room-${roomNum}/${docType}/${uploadedAt.slice(0,10)}/${Date.now()}-${randomToken().slice(0,12)}-${originalName}.${ext}`;
+      const docId = randomToken().slice(0, 24);
+
+      await env.RENTAL_R2.put(objectKey, bytes, {
+        httpMetadata: { contentType: mimeType },
+        customMetadata: {
+          app: 'pananth-rental',
+          category: 'tenant-document',
+          roomNum,
+          docType,
+          originalName,
+          uploadedAt,
+          mimeType,
+          documentId: docId,
+        },
+      });
+
+      const profiles = await getTenantProfilesFromKV();
+      const existing = profiles[roomNum] || normalizeTenantProfile({ roomNum }, roomNum);
+      const nextDocument = {
+        id: docId,
+        type: docType,
+        label: tenantSafeText(body.label || '', 120),
+        key: objectKey,
+        fileName: originalName,
+        mimeType,
+        size: bytes.byteLength,
+        uploadedAt,
+        uploadedAtText,
+      };
+      existing.documents = Array.isArray(existing.documents) ? existing.documents : [];
+      existing.documents.push(nextDocument);
+      existing.updatedAt = uploadedAt;
+      if (!existing.createdAt) existing.createdAt = uploadedAt;
+      profiles[roomNum] = normalizeTenantProfile(existing, roomNum);
+      await putKVJson('tenantProfiles', profiles);
+      await logEvent({
+        action: 'uploadTenantDocument',
+        message: 'Tenant document uploaded',
+        roomNum,
+        extra: { docType, objectKey, size: bytes.byteLength },
+      });
+      return jsonResponse({ ok: true, tenantProfiles: profiles, profile: profiles[roomNum], document: nextDocument });
+    }
+
+    if (body.action === 'deleteTenantDocument') {
+      const roomNum = String(parseInt(body.roomNum || 0, 10) || '').trim();
+      const documentId = tenantSafeText(body.documentId || body.id || '', 80);
+      const key = assertSafeTenantDocumentKey(body.key || '');
+      if (!roomNum || !isValidRoomNum(roomNum)) {
+        return jsonResponse({ ok: false, error: 'Invalid room number' }, 400);
+      }
+      if (!documentId && !key) return jsonResponse({ ok: false, error: 'Document reference required' }, 400);
+
+      const profiles = await getTenantProfilesFromKV();
+      const profile = profiles[roomNum] || normalizeTenantProfile({ roomNum }, roomNum);
+      const docs = Array.isArray(profile.documents) ? profile.documents : [];
+      const target = docs.find(doc => (documentId && doc.id === documentId) || (key && doc.key === key));
+      if (!target) return jsonResponse({ ok: false, error: 'Document not found in tenant profile' }, 404);
+
+      const targetKey = assertSafeTenantDocumentKey(target.key || '');
+      if (targetKey && env.RENTAL_R2 && typeof env.RENTAL_R2.delete === 'function') {
+        try { await env.RENTAL_R2.delete(targetKey); } catch (_) {}
+      }
+
+      profile.documents = docs.filter(doc => doc.id !== target.id && doc.key !== target.key);
+      profile.updatedAt = new Date().toISOString();
+      profiles[roomNum] = normalizeTenantProfile(profile, roomNum);
+      await putKVJson('tenantProfiles', profiles);
+      await logEvent({
+        action: 'deleteTenantDocument',
+        message: 'Tenant document deleted',
+        roomNum,
+        extra: { documentId: target.id, objectKey: target.key },
+      });
+      return jsonResponse({ ok: true, tenantProfiles: profiles, profile: profiles[roomNum] });
     }
 
     if (body.action === 'saveHistory') {
