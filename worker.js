@@ -1,4 +1,4 @@
-// v15.4.2.57: tenant portal header uses tenant profile name before LINE display name
+// v15.4.2.58: tenant portal payment QR card asset added on frontend
 export default {
   // v15.4.2.42: Tenant profile / document center + monthly archive index fix
   async fetch(request, env, ctx) {
@@ -808,7 +808,7 @@ export default {
       const values = await Promise.all(keys.map(k => env.DB.get(k)));
       const backup = {
         app: 'pananth-rental',
-        version: 'v15.4.2.57',
+        version: 'v15.4.2.58',
         backupType,
         reason,
         backupId,
