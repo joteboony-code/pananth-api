@@ -1,4 +1,4 @@
-// v15.4.2.53: contract expiry owner LINE alerts + rental agreement PDF download asset in frontend
+// v15.4.2.55: tenant LINE OA broadcast announcements + activity logs
 export default {
   // v15.4.2.42: Tenant profile / document center + monthly archive index fix
   async fetch(request, env, ctx) {
@@ -808,7 +808,7 @@ export default {
       const values = await Promise.all(keys.map(k => env.DB.get(k)));
       const backup = {
         app: 'pananth-rental',
-        version: 'v15.4.2.53',
+        version: 'v15.4.2.55',
         backupType,
         reason,
         backupId,
@@ -2614,6 +2614,131 @@ export default {
       await logEvent({ action: 'setupTestRoom99', message: 'Test room 99 setup from web app', roomNum: TEST_ROOM_KEY });
 
       return jsonResponse({ ok: true, roomNum: TEST_ROOM_KEY, room: rooms[TEST_ROOM_KEY] });
+    }
+
+
+    if (body.action === 'sendTenantBroadcast') {
+      const message = String(body.message || '').trim();
+      if (!message) {
+        return jsonResponse({ ok: false, error: 'ข้อความประกาศว่าง' }, 400);
+      }
+      if (message.length > 4500) {
+        return jsonResponse({ ok: false, error: 'ข้อความประกาศยาวเกิน 4,500 ตัวอักษร' }, 400);
+      }
+
+      const requestedRooms = Array.from(new Set(
+        (Array.isArray(body.roomNums) ? body.roomNums : [])
+          .map(v => String(parseInt(v || 0, 10) || '').trim())
+          .filter(roomNum => roomNum && isValidRoomNum(roomNum) && !isTestRoom(roomNum))
+      ));
+
+      if (!requestedRooms.length) {
+        return jsonResponse({ ok: false, error: 'ยังไม่ได้เลือกห้องปลายทาง' }, 400);
+      }
+
+      const [config, rooms, tenants] = await Promise.all([
+        getKVJson('config', {}),
+        getKVJson('rooms', {}),
+        getKVJson('tenants', {}),
+      ]);
+      const cfg = sanitizeConfig(config || {});
+      const userIds = cfg.userIds || {};
+
+      const uniqueRecipients = new Map();
+      const skippedRooms = [];
+      let skippedNoUserId = 0;
+      let skippedVacant = 0;
+      let skippedDuplicateRecipients = 0;
+
+      for (const roomNum of requestedRooms) {
+        const room = rooms?.[roomNum] || rooms?.[Number(roomNum)] || {};
+        if (room?.vacant === true) {
+          skippedVacant += 1;
+          skippedRooms.push({ roomNum, reason: 'vacant' });
+          continue;
+        }
+
+        const userId = String(userIds?.[roomNum] || userIds?.[Number(roomNum)] || '').trim();
+        if (!userId) {
+          skippedNoUserId += 1;
+          skippedRooms.push({ roomNum, reason: 'missing-user-id' });
+          continue;
+        }
+
+        if (uniqueRecipients.has(userId)) {
+          skippedDuplicateRecipients += 1;
+          const current = uniqueRecipients.get(userId);
+          current.roomNums.push(roomNum);
+          continue;
+        }
+
+        uniqueRecipients.set(userId, {
+          userId,
+          roomNums: [roomNum],
+          tenantName: String(tenants?.[roomNum]?.name || tenants?.[Number(roomNum)]?.name || '').trim(),
+        });
+      }
+
+      const results = [];
+      let sentCount = 0;
+      let failedCount = 0;
+
+      for (const recipient of uniqueRecipients.values()) {
+        try {
+          const result = await pushLine(TOKEN, recipient.userId, message);
+          const ok = !!result?.ok;
+          if (ok) sentCount += 1;
+          else failedCount += 1;
+          results.push({
+            ok,
+            roomNums: recipient.roomNums,
+            status: Number(result?.status || 0),
+            error: result?.error || result?.result?.message || '',
+          });
+        } catch (err) {
+          failedCount += 1;
+          results.push({
+            ok: false,
+            roomNums: recipient.roomNums,
+            status: 0,
+            error: err?.message || String(err),
+          });
+        }
+      }
+
+      const preview = message.length > 180 ? message.slice(0, 180) + '…' : message;
+      await logEvent({
+        action: 'tenantBroadcastSent',
+        message: sentCount > 0
+          ? 'ส่งประกาศถึงผู้เช่าผ่าน LINE OA'
+          : 'พยายามส่งประกาศถึงผู้เช่าผ่าน LINE OA แต่ไม่สำเร็จ',
+        extra: {
+          actor: 'เจ้าของ/แอดมิน',
+          source: 'web',
+          requestedRoomCount: requestedRooms.length,
+          requestedRooms,
+          uniqueRecipientCount: uniqueRecipients.size,
+          sentCount,
+          failedCount,
+          skippedNoUserId,
+          skippedVacant,
+          skippedDuplicateRecipients,
+          messagePreview: preview,
+        },
+      });
+
+      return jsonResponse({
+        ok: failedCount === 0,
+        sentCount,
+        failedCount,
+        uniqueRecipientCount: uniqueRecipients.size,
+        requestedRoomCount: requestedRooms.length,
+        skippedNoUserId,
+        skippedVacant,
+        skippedDuplicateRecipients,
+        skippedRooms,
+        results,
+      }, failedCount === 0 ? 200 : 207);
     }
 
     if (body.action === 'sendOwnerMessage') {
