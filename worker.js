@@ -1,4 +1,4 @@
-// v15.4.2.56: LIFF Tenant Portal API with LINE ID token verification
+// v15.4.2.57: tenant portal header uses tenant profile name before LINE display name
 export default {
   // v15.4.2.42: Tenant profile / document center + monthly archive index fix
   async fetch(request, env, ctx) {
@@ -808,7 +808,7 @@ export default {
       const values = await Promise.all(keys.map(k => env.DB.get(k)));
       const backup = {
         app: 'pananth-rental',
-        version: 'v15.4.2.56',
+        version: 'v15.4.2.57',
         backupType,
         reason,
         backupId,
