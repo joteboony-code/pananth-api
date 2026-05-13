@@ -1,4 +1,4 @@
-// v15.4.2.46: tenant move-out archive, tenant profile history retention, contract/deposit support
+// v15.4.2.51: system activity history records for key admin actions + tenant/document activity view
 export default {
   // v15.4.2.42: Tenant profile / document center + monthly archive index fix
   async fetch(request, env, ctx) {
@@ -808,7 +808,7 @@ export default {
       const values = await Promise.all(keys.map(k => env.DB.get(k)));
       const backup = {
         app: 'pananth-rental',
-        version: 'v15.4.2.46',
+        version: 'v15.4.2.51',
         backupType,
         reason,
         backupId,
@@ -1766,7 +1766,7 @@ export default {
         action: 'uploadTenantDocument',
         message: 'Tenant document uploaded',
         roomNum,
-        extra: { docType, objectKey, size: bytes.byteLength },
+        extra: { docType, objectKey, size: bytes.byteLength, fileName: originalName },
       });
       return jsonResponse({ ok: true, tenantProfiles: profiles, profile: profiles[roomNum], document: nextDocument });
     }
@@ -1799,7 +1799,7 @@ export default {
         action: 'deleteTenantDocument',
         message: 'Tenant document deleted',
         roomNum,
-        extra: { documentId: target.id, objectKey: target.key },
+        extra: { documentId: target.id, objectKey: target.key, docType: target.type || '', fileName: target.fileName || '' },
       });
       return jsonResponse({ ok: true, tenantProfiles: profiles, profile: profiles[roomNum] });
     }
@@ -1834,6 +1834,32 @@ export default {
     if (body.action === 'clearLogs') {
       await putKVJson('logs', []);
       return textResponse('OK');
+    }
+
+    if (body.action === 'recordActivity') {
+      const activityAction = String(body.activityAction || body.eventType || 'webActivity')
+        .replace(/[^a-zA-Z0-9_-]/g, '')
+        .slice(0, 80) || 'webActivity';
+      const message = String(body.message || 'System activity').slice(0, 500);
+      const roomNum = String(body.roomNum || '').slice(0, 30);
+      const rawExtra = body.extra && typeof body.extra === 'object' && !Array.isArray(body.extra)
+        ? body.extra
+        : {};
+      let extra = rawExtra;
+      try {
+        if (JSON.stringify(rawExtra).length > 12000) {
+          extra = { actor: rawExtra.actor || 'เจ้าของ/แอดมิน', source: rawExtra.source || 'web', truncated: true };
+        }
+      } catch (_) {
+        extra = {};
+      }
+      await logEvent({
+        action: activityAction,
+        message,
+        roomNum,
+        extra,
+      });
+      return jsonResponse({ ok: true });
     }
 
     if (body.action === 'saveMonthControl') {
