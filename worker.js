@@ -1,4 +1,59 @@
-// v15.4.2.61: tenant LINE OA notifications append Tenant Portal link
+// v15.4.2.65: payment star status on main dashboard and Tenant Portal
+const DEFAULT_LINE_TEMPLATES = Object.freeze({
+  rentNotice: `🏠 {shopName} — ห้อง {room}
+{tenantNameLine}📅 รอบบิล {billingMonth}
+📆 วันที่จด {date}
+━━━━━━━━━━━━━━
+{detailLines}
+━━━━━━━━━━━━━━
+💰 ยอดคงเหลือที่ต้องชำระ: {totalDue}฿
+━━━━━━━━━━━━━━
+📲 {bank}
+
+กรุณาตรวจสอบความถูกต้อง หากมีข้อผิดพลาดประการใด กรุณาแจ้งให้เราทราบด้วยครับ`,
+  overdueReminder: `{autoLabel}🔔 แจ้งเตือนค่าเช่า — ห้อง {room}
+{tenantNameLine}📅 รอบบิล {billingMonth}
+🗓️ วันที่แจ้ง {date}
+━━━━━━━━━━━━━━
+{detailLines}
+━━━━━━━━━━━━━━
+💰 ยอดคงเหลือที่ต้องชำระ: {totalDue}฿
+━━━━━━━━━━━━━━
+📲 {bank}`,
+  paymentConfirmation: `✅ {paymentTitle}
+
+ห้อง {room}
+รอบบิล {billingMonth}
+สถานะ: {status}
+รับชำระแล้ว: {paidAmount} บาท
+ยอดคงเหลือ: {remaining} บาท
+
+{paymentNote}`,
+  announcement: `📢 ประกาศถึงผู้เช่า
+{announcement}`,
+});
+
+const LINE_TEMPLATE_KEYS = Object.freeze(['rentNotice', 'overdueReminder', 'paymentConfirmation', 'announcement']);
+
+function sanitizeLineTemplates(input = {}) {
+  const source = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+  const out = {};
+  for (const key of LINE_TEMPLATE_KEYS) {
+    const raw = typeof source[key] === 'string' ? String(source[key]).trim() : '';
+    out[key] = raw ? raw.slice(0, 4500) : DEFAULT_LINE_TEMPLATES[key];
+  }
+  return out;
+}
+
+function renderLineTemplate(templateKey, vars = {}, templates = {}) {
+  const templateMap = sanitizeLineTemplates(templates || {});
+  const template = templateMap[templateKey] || DEFAULT_LINE_TEMPLATES[templateKey] || '';
+  return String(template).replace(/\{([a-zA-Z0-9_]+)\}/g, (_, token) => {
+    const value = vars && Object.prototype.hasOwnProperty.call(vars, token) ? vars[token] : '';
+    return value === undefined || value === null ? '' : String(value);
+  }).replace(/\n{4,}/g, '\n\n\n').trim();
+}
+
 export default {
   // v15.4.2.42: Tenant profile / document center + monthly archive index fix
   async fetch(request, env, ctx) {
@@ -626,7 +681,7 @@ export default {
         return 'Invalid backup data';
       }
       const restoreSchema = {
-        rooms: 'object', config: 'object', shopinfo: 'object', tenants: 'object', tenantProfiles: 'object', history: 'object',
+        rooms: 'object', config: 'object', shopinfo: 'object', tenants: 'object', tenantProfiles: 'object', lineTemplates: 'object', history: 'object',
         paymentHistory: 'array', expenses: 'array', logs: 'array', slipRefs: 'object',
         monthClosures: 'object', lockedMonths: 'object', arrears: 'object', editHistory: 'array',
         monthlyArchiveIndex: 'object'
@@ -654,6 +709,7 @@ export default {
         ['shopinfo', {}],
         ['tenants', {}],
         ['tenantProfiles', {}],
+        ['lineTemplates', {}],
         ['history', {}],
         ['paymentHistory', []],
         ['expenses', []],
@@ -672,7 +728,9 @@ export default {
         if (data[key] !== undefined) {
           const value = key === 'config'
             ? sanitizeConfig(data[key] || {})
-            : (key === 'tenantProfiles' ? normalizeTenantProfilesMap(data[key] || {}) : data[key] ?? fallback);
+            : (key === 'tenantProfiles'
+              ? normalizeTenantProfilesMap(data[key] || {})
+              : (key === 'lineTemplates' ? sanitizeLineTemplates(data[key] || {}) : data[key] ?? fallback));
           await putKVJson(key, value);
           restoredKeys.push(key);
         }
@@ -802,6 +860,93 @@ export default {
       };
     };
 
+    // ===== PAYMENT STAR STATUS =====
+    // เกณฑ์:
+    // - ชำระหลังเปิดรอบใหม่ และก่อนวันที่ 5 ของเดือนรับชำระ = 5 ดาว
+    // - วันที่ 5-10 ของเดือนรับชำระ = 4 ดาว
+    // - หลังวันที่ 10 = 3 ดาว
+    // รอบที่เปิดก่อนขึ้นเดือนใหม่ เช่น เปิด 29 แล้วจ่าย 29-31 จะอยู่ก่อนวันที่ 5 จึงได้ 5 ดาว
+    const getPaymentCycleOpenedAtFromConfig = (cfg = {}) =>
+      String(cfg.currentPaymentCycleOpenedAt || cfg.paymentCycleOpenedAt || '').trim();
+
+    const paymentStarIsoMs = (value = '') => {
+      const ms = Date.parse(String(value || '').trim());
+      return Number.isFinite(ms) ? ms : 0;
+    };
+
+    const paymentStarWasAfterCycleOpen = (paidAt = '', cycleOpenedAt = '') => {
+      const paidMs = paymentStarIsoMs(paidAt);
+      const openMs = paymentStarIsoMs(cycleOpenedAt);
+      if (!paidMs) return false;
+      // ข้อมูลเก่าก่อนมี currentPaymentCycleOpenedAt ยังให้คำนวณดาวได้
+      if (!openMs) return true;
+      return paidMs >= openMs;
+    };
+
+    const buildPaymentStars = ({ paidAt = '', paidAtText = '', paymentMonthKey = '', cycleOpenedAt = '' } = {}) => {
+      const paidMs = paymentStarIsoMs(paidAt);
+      const key = String(paymentMonthKey || '').trim();
+      if (!paidMs || !/^\d{4}-\d{2}$/.test(key)) return null;
+      if (!paymentStarWasAfterCycleOpen(paidAt, cycleOpenedAt)) return null;
+
+      const day5StartMs = Date.parse(`${key}-05T00:00:00+07:00`);
+      const day11StartMs = Date.parse(`${key}-11T00:00:00+07:00`);
+      if (!Number.isFinite(day5StartMs) || !Number.isFinite(day11StartMs)) return null;
+
+      const stars = paidMs < day5StartMs ? 5 : (paidMs < day11StartMs ? 4 : 3);
+      return {
+        stars,
+        text: '⭐'.repeat(stars),
+        paidAt: String(paidAt || ''),
+        paidAtText: String(paidAtText || paidAt || ''),
+      };
+    };
+
+    const getCurrentCyclePaidAtForStars = ({
+      roomNum = '',
+      room = {},
+      paymentHistory = [],
+      billingMeta = {},
+      cycleOpenedAt = '',
+    } = {}) => {
+      const candidates = [];
+      const explicitPaidAt = String(room?.paidAt || room?.manualPaidAt || '').trim();
+      const explicitPaidAtText = String(room?.paidAtText || room?.manualPaidAtText || explicitPaidAt || '').trim();
+      if (explicitPaidAt && paymentStarWasAfterCycleOpen(explicitPaidAt, cycleOpenedAt)) {
+        candidates.push({ paidAt: explicitPaidAt, paidAtText: explicitPaidAtText, source: 'room' });
+      }
+
+      const targetRoom = String(roomNum || '').trim();
+      const targetBillingMonthKey = String(billingMeta?.billingMonthKey || '').trim();
+      for (const payment of Array.isArray(paymentHistory) ? paymentHistory : []) {
+        if (String(payment?.roomNum || payment?.room || '').trim() !== targetRoom) continue;
+        const appliedItems = Array.isArray(payment?.appliedItems) ? payment.appliedItems : [];
+        const isCurrentCyclePayment = appliedItems.some(item =>
+          String(item?.type || '').trim() === 'current' &&
+          String(item?.monthKey || '').trim() === targetBillingMonthKey
+        );
+        if (!isCurrentCyclePayment) continue;
+
+        const remainingKnown = payment?.remainingTotal !== undefined && payment?.remainingTotal !== null && payment?.remainingTotal !== '';
+        const statusKey = String(payment?.status || '').trim().toLowerCase();
+        const completed = remainingKnown
+          ? Number(payment.remainingTotal || 0) <= 0
+          : (statusKey === 'paid' || statusKey === 'verified');
+        if (!completed) continue;
+
+        const paidAt = String(payment?.paidAt || payment?.createdAt || '').trim();
+        if (!paidAt || !paymentStarWasAfterCycleOpen(paidAt, cycleOpenedAt)) continue;
+        candidates.push({
+          paidAt,
+          paidAtText: String(payment?.paidAtText || payment?.createdAtText || paidAt || '').trim(),
+          source: 'paymentHistory',
+        });
+      }
+
+      candidates.sort((a, b) => paymentStarIsoMs(a.paidAt) - paymentStarIsoMs(b.paidAt));
+      return candidates[0] || null;
+    };
+
     const safeBackupPart = (v, fallback = 'unknown') => String(v || fallback)
       .replace(/[^0-9a-zA-Zก-๙_-]/g, '-')
       .replace(/-+/g, '-')
@@ -812,11 +957,11 @@ export default {
       const now = new Date();
       const pad = n => String(n).padStart(2, '0');
       const backupId = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-      const keys = ['rooms','config','shopinfo','tenants','tenantProfiles','history','paymentHistory','expenses','logs','slipRefs','monthClosures','lockedMonths','lastCloseBackup','arrears','editHistory','monthlyArchiveIndex'];
+      const keys = ['rooms','config','shopinfo','tenants','tenantProfiles','lineTemplates','history','paymentHistory','expenses','logs','slipRefs','monthClosures','lockedMonths','lastCloseBackup','arrears','editHistory','monthlyArchiveIndex'];
       const values = await Promise.all(keys.map(k => env.DB.get(k)));
       const backup = {
         app: 'pananth-rental',
-        version: 'v15.4.2.59',
+        version: 'v15.4.2.65',
         backupType,
         reason,
         backupId,
@@ -829,7 +974,7 @@ export default {
       keys.forEach((k, idx) => {
         const fallback = k === 'paymentHistory' || k === 'expenses' || k === 'logs' || k === 'editHistory' ? [] : (k === 'lastCloseBackup' ? null : {});
         const parsed = safeJsonParse(values[idx], fallback);
-        backup[k] = k === 'config' ? sanitizeConfig(parsed || {}) : (k === 'tenantProfiles' ? normalizeTenantProfilesMap(parsed || {}) : parsed);
+        backup[k] = k === 'config' ? sanitizeConfig(parsed || {}) : (k === 'tenantProfiles' ? normalizeTenantProfilesMap(parsed || {}) : (k === 'lineTemplates' ? sanitizeLineTemplates(parsed || {}) : parsed));
       });
 
       const cfgMeta = getBillingMetaFromConfig(backup.config || {});
@@ -1366,9 +1511,13 @@ export default {
         if (room.manualPaidAmount >= fullTotal) {
           room.paid = true;
           room.manualRemaining = 0;
+          room.paidAt = room.manualPaidAt || new Date().toISOString();
+          room.paidAtText = room.manualPaidAtText || thTime();
         } else {
           room.paid = false;
           room.manualRemaining = fullTotal - room.manualPaidAmount;
+          room.paidAt = '';
+          room.paidAtText = '';
         }
 
         remainingPayment -= appliedCurrent;
@@ -1439,6 +1588,7 @@ export default {
         shopinfo,
         tenants,
         tenantProfiles,
+        lineTemplates,
         history,
         paymentHistory,
         expenses,
@@ -1458,6 +1608,7 @@ export default {
         env.DB.get('shopinfo'),
         env.DB.get('tenants'),
         env.DB.get('tenantProfiles'),
+        env.DB.get('lineTemplates'),
         env.DB.get('history'),
         env.DB.get('paymentHistory'),
         env.DB.get('expenses'),
@@ -1547,6 +1698,7 @@ export default {
         shopinfo: safeJsonParse(shopinfo, {}),
         tenants: safeJsonParse(tenants, {}),
         tenantProfiles: normalizeTenantProfilesMap(safeJsonParse(tenantProfiles, {})),
+        lineTemplates: sanitizeLineTemplates(safeJsonParse(lineTemplates, {})),
         history: safeJsonParse(history, {}),
         paymentHistory: safeJsonParse(paymentHistory, []),
         expenses: safeJsonParse(expenses, []),
@@ -1793,6 +1945,25 @@ export default {
           ? 'vacant'
           : (currentRemaining <= 0 ? 'paid' : (currentPaid > 0 ? 'partial' : 'unpaid'));
 
+        const cycleOpenedAtForStars = getPaymentCycleOpenedAtFromConfig(cfg);
+        const paidAtForStars = status === 'paid'
+          ? getCurrentCyclePaidAtForStars({
+              roomNum,
+              room,
+              paymentHistory,
+              billingMeta,
+              cycleOpenedAt: cycleOpenedAtForStars,
+            })
+          : null;
+        const paymentStars = paidAtForStars
+          ? buildPaymentStars({
+              paidAt: paidAtForStars.paidAt,
+              paidAtText: paidAtForStars.paidAtText,
+              paymentMonthKey: billingMeta.paymentMonthKey,
+              cycleOpenedAt: cycleOpenedAtForStars,
+            })
+          : null;
+
         const historyCutoffDate = String(profile.moveInDate || profile.contractStart || '').trim();
         const historyCutoffMs = portalDateToMs(historyCutoffDate);
         const historyCutoffMonthKey = portalMonthCutoffKey(historyCutoffDate);
@@ -1846,6 +2017,7 @@ export default {
           tenantName: String(profile.fullName || tenant.name || '').trim(),
           status,
           billingMeta,
+          paymentStars,
           meters: {
             ep: Number(room.ep || 0) || 0,
             ec: Number(room.ec || 0) || 0,
@@ -1922,6 +2094,17 @@ export default {
     if (body.action === 'saveConfig') {
       await putKVJson('config', sanitizeConfig(body.data || {}));
       return textResponse('OK');
+    }
+
+    if (body.action === 'saveLineTemplates') {
+      const lineTemplates = sanitizeLineTemplates(body.data || {});
+      await putKVJson('lineTemplates', lineTemplates);
+      await logEvent({
+        action: 'saveLineTemplates',
+        message: 'LINE message templates saved',
+        extra: { templateKeys: Object.keys(lineTemplates) },
+      });
+      return jsonResponse({ ok: true, lineTemplates });
     }
 
     if (body.action === 'saveShop') {
@@ -2735,11 +2918,12 @@ export default {
         return jsonResponse({ ok: false, error: 'Invalid payment method' }, 400);
       }
 
-      const [rooms, arrears, paymentHistory, config] = await Promise.all([
+      const [rooms, arrears, paymentHistory, config, lineTemplates] = await Promise.all([
         getKVJson('rooms', {}),
         getKVJson('arrears', {}),
         getKVJson('paymentHistory', []),
         getKVJson('config', {}),
+        getKVJson('lineTemplates', {}),
       ]);
       const billingMeta = getBillingMetaFromConfig(sanitizeConfig(config || {}));
 
@@ -2815,9 +2999,16 @@ export default {
           tenantNotify = { ok: false, skipped: true, reason: 'no_user_id', error: 'ห้องนี้ยังไม่มี LINE User ID' };
         } else {
           const statusText = result.remainingTotal <= 0 ? 'ชำระแล้ว' : 'รับชำระบางส่วน';
-          const notifyText = result.remainingTotal <= 0
-            ? `✅ อัปเดตสถานะการชำระแล้ว\n\nห้อง ${roomNum}\nรอบบิล ${billingMeta.billingMonthText || '-'}\nสถานะ: ชำระแล้ว\n\nเจ้าของตรวจสอบยอดและอัปเดตให้เรียบร้อยแล้ว`
-            : `✅ อัปเดตยอดชำระแล้ว\n\nห้อง ${roomNum}\nรอบบิล ${billingMeta.billingMonthText || '-'}\nสถานะ: ${statusText}\nรับชำระแล้ว: ${Number(result.appliedTotal || amount || 0).toLocaleString('th-TH')} บาท\nยอดคงเหลือ: ${Number(result.remainingTotal || 0).toLocaleString('th-TH')} บาท\n\nเจ้าของตรวจสอบยอดและอัปเดตให้เรียบร้อยแล้ว`;
+          const notifyText = renderLineTemplate('paymentConfirmation', {
+            paymentTitle: result.remainingTotal <= 0 ? 'อัปเดตสถานะการชำระแล้ว' : 'อัปเดตยอดชำระแล้ว',
+            room: roomNum,
+            billingMonth: billingMeta.billingMonthText || '-',
+            status: statusText,
+            paidAmount: Number(result.appliedTotal || amount || 0).toLocaleString('th-TH'),
+            remaining: Number(result.remainingTotal || 0).toLocaleString('th-TH'),
+            paymentNote: 'เจ้าของตรวจสอบยอดและอัปเดตให้เรียบร้อยแล้ว',
+            portalUrl: TENANT_PORTAL_URL,
+          }, lineTemplates);
           tenantNotify = await pushLine(TOKEN, userId, notifyText);
         }
         paymentRecord.tenantNotify = tenantNotify;
@@ -2888,10 +3079,11 @@ export default {
         return jsonResponse({ ok: false, error: 'ยังไม่ได้เลือกห้องปลายทาง' }, 400);
       }
 
-      const [config, rooms, tenants] = await Promise.all([
+      const [config, rooms, tenants, lineTemplates] = await Promise.all([
         getKVJson('config', {}),
         getKVJson('rooms', {}),
         getKVJson('tenants', {}),
+        getKVJson('lineTemplates', {}),
       ]);
       const cfg = sanitizeConfig(config || {});
       const userIds = cfg.userIds || {};
@@ -2937,7 +3129,14 @@ export default {
 
       for (const recipient of uniqueRecipients.values()) {
         try {
-          const result = await pushLine(TOKEN, recipient.userId, message);
+          const renderedAnnouncement = renderLineTemplate('announcement', {
+            announcement: message,
+            room: recipient.roomNums.join(', '),
+            tenantName: recipient.tenantName || '',
+            tenantNameLine: recipient.tenantName ? '👤 ' + recipient.tenantName + '\n' : '',
+            portalUrl: TENANT_PORTAL_URL,
+          }, lineTemplates);
+          const result = await pushLine(TOKEN, recipient.userId, renderedAnnouncement);
           const ok = !!result?.ok;
           if (ok) sentCount += 1;
           else failedCount += 1;
@@ -3043,7 +3242,7 @@ export default {
             if (event.type === 'message' && event.message?.type === 'image') {
               await replyLine(TOKEN, event.replyToken, 'ได้รับข้อมูลแล้วครับ รอตรวจสอบสักครู่นะครับ 😊');
 
-              const [configData, tenantsData, roomsData, paymentData, slipRefsData, arrearsData, monthClosuresData, lastCloseBackupData] = await Promise.all([
+              const [configData, tenantsData, roomsData, paymentData, slipRefsData, arrearsData, monthClosuresData, lastCloseBackupData, lineTemplatesData] = await Promise.all([
                 env.DB.get('config'),
                 env.DB.get('tenants'),
                 env.DB.get('rooms'),
@@ -3052,6 +3251,7 @@ export default {
                 env.DB.get('arrears'),
                 env.DB.get('monthClosures'),
                 env.DB.get('lastCloseBackup'),
+                env.DB.get('lineTemplates'),
               ]);
 
               const normalizedCycle = normalizeBillingCycleConfig(
@@ -3070,6 +3270,7 @@ export default {
               const paymentHistory = safeJsonParse(paymentData, []);
               const slipRefs = safeJsonParse(slipRefsData, {});
               const arrears = safeJsonParse(arrearsData, {});
+              const lineTemplates = sanitizeLineTemplates(safeJsonParse(lineTemplatesData, {}));
               let roomNum = null;
               let roomInfo = describeUserRooms(cfg, ten, userId);
 
@@ -3348,11 +3549,16 @@ export default {
                   await pushLine(
                     TOKEN,
                     userId,
-                    '✅ ตรวจสอบสลิปเรียบร้อยครับ' +
-                      '\n🏠 ' + roomInfo +
-                      '\n📅 รอบบิล: ' + billingMeta.billingMonthText +
-                      '\n💰 ยอดชำระ: ' + slipAmount.toLocaleString('th-TH') + ' ฿' +
-                      '\nสถานะห้องของคุณถูกอัปเดตเป็น “ชำระแล้ว” แล้วครับ 😊'
+                    renderLineTemplate('paymentConfirmation', {
+                      paymentTitle: 'ตรวจสอบสลิปเรียบร้อยครับ',
+                      room: roomInfo || roomNum || '-',
+                      billingMonth: billingMeta.billingMonthText || '-',
+                      status: 'ชำระแล้ว',
+                      paidAmount: slipAmount.toLocaleString('th-TH'),
+                      remaining: '0',
+                      paymentNote: 'สถานะห้องของคุณถูกอัปเดตเป็น “ชำระแล้ว” แล้วครับ 😊',
+                      portalUrl: TENANT_PORTAL_URL,
+                    }, lineTemplates)
                   );
 
                   await pushLine(
@@ -3370,12 +3576,16 @@ export default {
                   await pushLine(
                     TOKEN,
                     userId,
-                    '✅ ได้รับสลิปและบันทึกยอดชำระแล้วครับ' +
-                      '\n🏠 ' + roomInfo +
-                      '\n📅 รอบบิล: ' + billingMeta.billingMonthText +
-                      '\n💰 ยอดที่ชำระ: ' + slipAmount.toLocaleString('th-TH') + ' ฿' +
-                      '\n⚠️ ยอดคงเหลือ: ' + applyResult.remainingTotal.toLocaleString('th-TH') + ' ฿' +
-                      '\nกรุณาชำระยอดคงเหลือภายหลังครับ'
+                    renderLineTemplate('paymentConfirmation', {
+                      paymentTitle: 'ได้รับสลิปและบันทึกยอดชำระแล้วครับ',
+                      room: roomInfo || roomNum || '-',
+                      billingMonth: billingMeta.billingMonthText || '-',
+                      status: 'รับชำระบางส่วน',
+                      paidAmount: slipAmount.toLocaleString('th-TH'),
+                      remaining: applyResult.remainingTotal.toLocaleString('th-TH'),
+                      paymentNote: 'กรุณาชำระยอดคงเหลือภายหลังครับ',
+                      portalUrl: TENANT_PORTAL_URL,
+                    }, lineTemplates)
                   );
 
                   await pushLine(
@@ -3681,11 +3891,12 @@ async function runAutoRentReminder(env) {
     return list.reduce((sum, a) => sum + Math.max(0, Number(a.remaining) || 0), 0);
   };
 
-  const [rooms, configRaw, tenants, arrears] = await Promise.all([
+  const [rooms, configRaw, tenants, arrears, lineTemplates] = await Promise.all([
     getKVJson('rooms', {}),
     getKVJson('config', {}),
     getKVJson('tenants', {}),
     getKVJson('arrears', {}),
+    getKVJson('lineTemplates', {}),
   ]);
 
   const config = {
@@ -3772,22 +3983,27 @@ async function runAutoRentReminder(env) {
     const trash = getRoomTrashValue(i, room);
     const wifi = Number(room.wifi) || 0;
 
-    const message =
-`ระบบอัตโนมัติ
-🔔 แจ้งเตือนค่าเช่า — ห้อง ${i}
-${tenantName ? `👤 ${tenantName}\n` : ''}📅 รอบบิล ${getMonthText()}
-🗓️ วันที่แจ้ง ${getDateText()}
-━━━━━━━━━━━━━━
-${oldDebt ? `📌 ยอดค้างเก่า: ${oldDebt.toLocaleString('th-TH')}฿\n` : ''}${currentDue ? `⚡ ค่าไฟ: ${room.ep} → ${room.ec} (${elecUnit} หน่วย × 8฿) = ${elecAmt.toLocaleString('th-TH')}฿
-💧 ค่าน้ำ: ${room.wp} → ${room.wc} (${waterUnit} หน่วย × 35฿) = ${waterAmt.toLocaleString('th-TH')}฿
-🏠 ค่าเช่า: ${rent.toLocaleString('th-TH')}฿
-🗑️ ค่าขยะ: ${trash.toLocaleString('th-TH')}฿
-${wifi ? `📶 WiFi: ${wifi.toLocaleString('th-TH')}฿\n` : ''}` : ''}━━━━━━━━━━━━━━
-💰 รวมต้องชำระทั้งหมด: ${totalDue.toLocaleString('th-TH')}฿
-━━━━━━━━━━━━━━
-🏦 โอนเข้า บัญชี ttb 919-7-253892
-นายบุญรัตน์ ชลา
-ส่งสลิปที่ไลน์นี้นะครับ`;
+    const detailLines = [
+      oldDebt ? `📌 ยอดค้างเก่า: ${oldDebt.toLocaleString('th-TH')}฿` : '',
+      currentDue ? `⚡ ค่าไฟ: ${room.ep} → ${room.ec} (${elecUnit} หน่วย × 8฿) = ${elecAmt.toLocaleString('th-TH')}฿` : '',
+      currentDue ? `💧 ค่าน้ำ: ${room.wp} → ${room.wc} (${waterUnit} หน่วย × 35฿) = ${waterAmt.toLocaleString('th-TH')}฿` : '',
+      currentDue ? `🏠 ค่าเช่า: ${rent.toLocaleString('th-TH')}฿` : '',
+      currentDue ? `🗑️ ค่าขยะ: ${trash.toLocaleString('th-TH')}฿` : '',
+      currentDue && wifi ? `📶 WiFi: ${wifi.toLocaleString('th-TH')}฿` : '',
+    ].filter(Boolean).join('\n');
+
+    const message = renderLineTemplate('overdueReminder', {
+      autoLabel: 'ระบบอัตโนมัติ\n',
+      room: i,
+      tenantName,
+      tenantNameLine: tenantName ? `👤 ${tenantName}\n` : '',
+      billingMonth: getMonthText(),
+      date: getDateText(),
+      detailLines,
+      totalDue: totalDue.toLocaleString('th-TH'),
+      bank: 'โอนเข้า บัญชี ttb 919-7-253892\nนายบุญรัตน์ ชลา\nส่งสลิปที่ไลน์นี้นะครับ',
+      portalUrl: TENANT_PORTAL_URL,
+    }, lineTemplates);
 
     try {
       const result = await pushLine(userId, message);
