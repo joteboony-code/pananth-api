@@ -1,4 +1,4 @@
-// v15.4.2.66: portal open tracking + unread reminder + LINE history + payment appointments + pending slip + meter photos
+// v15.4.2.67: pre-send billing checklist + contract center + repair requests + maintenance photos
 const DEFAULT_LINE_TEMPLATES = Object.freeze({
   rentNotice: `🏠 {shopName} — ห้อง {room}
 {tenantNameLine}📅 รอบบิล {billingMonth}
@@ -122,6 +122,16 @@ export default {
       'image/png',
       'image/webp',
     ]);
+
+    // ===== REPAIR REQUEST / MAINTENANCE PHOTO STORAGE =====
+    const REPAIR_PHOTO_PREFIX = 'repair-requests/';
+    const MAX_REPAIR_PHOTO_BYTES = 4 * 1024 * 1024;
+    const REPAIR_PHOTO_ALLOWED_MIME = new Set([
+      'image/jpeg',
+      'image/png',
+      'image/webp',
+    ]);
+    const REPAIR_REQUEST_STATUSES = new Set(['open', 'in_progress', 'done', 'closed']);
 
     // ===== TEST ROOM 99 =====
     const TEST_ROOM_NUM = 99;
@@ -548,6 +558,66 @@ export default {
       return 'jpg';
     };
 
+    const assertSafeRepairPhotoKey = (key = '') => {
+      const safeKey = tenantSafeText(key || '', 420);
+      return safeKey.startsWith(REPAIR_PHOTO_PREFIX) && !safeKey.includes('..')
+        ? safeKey
+        : '';
+    };
+
+    const repairPhotoExtFromMime = (mime = '') => {
+      if (mime === 'image/jpeg') return 'jpg';
+      if (mime === 'image/png') return 'png';
+      if (mime === 'image/webp') return 'webp';
+      return 'jpg';
+    };
+
+    const sanitizeRepairPhotoMeta = (photo = {}) => {
+      const key = assertSafeRepairPhotoKey(photo.key || photo.objectKey || '');
+      if (!key) return null;
+      return {
+        id: tenantSafeText(photo.id || randomToken().slice(0, 20), 80),
+        key,
+        fileName: tenantSafeText(photo.fileName || '', 180),
+        mimeType: tenantSafeText(photo.mimeType || '', 80),
+        size: tenantSafeNumber(photo.size || 0, 0),
+        uploadedAt: tenantSafeText(photo.uploadedAt || '', 80),
+        uploadedAtText: tenantSafeText(photo.uploadedAtText || '', 120),
+      };
+    };
+
+    const sanitizeRepairRequests = (input = []) => {
+      const rows = Array.isArray(input) ? input : [];
+      return rows.slice(-800).map(rowRaw => {
+        const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
+        const roomNum = String(parseInt(row.roomNum || row.room || 0, 10) || '').trim();
+        if (!roomNum || !isValidRoomNum(roomNum) || isTestRoom(roomNum)) return null;
+        const rawStatus = String(row.status || 'open').trim();
+        const status = REPAIR_REQUEST_STATUSES.has(rawStatus) ? rawStatus : 'open';
+        const photos = Array.isArray(row.photos)
+          ? row.photos.map(sanitizeRepairPhotoMeta).filter(Boolean).slice(0, 3)
+          : [];
+        return {
+          id: tenantSafeText(row.id || randomToken().slice(0, 24), 100),
+          roomNum,
+          lineUserId: tenantSafeText(row.lineUserId || '', 160),
+          tenantName: tenantSafeText(row.tenantName || '', 180),
+          category: tenantSafeText(row.category || 'อื่น ๆ', 80),
+          detail: tenantSafeText(row.detail || row.message || '', 1500),
+          status,
+          statusText: tenantSafeText(row.statusText || '', 80),
+          adminNote: tenantSafeText(row.adminNote || '', 700),
+          photos,
+          createdAt: tenantSafeText(row.createdAt || '', 80),
+          createdAtText: tenantSafeText(row.createdAtText || '', 120),
+          updatedAt: tenantSafeText(row.updatedAt || '', 80),
+          updatedAtText: tenantSafeText(row.updatedAtText || '', 120),
+          resolvedAt: tenantSafeText(row.resolvedAt || '', 80),
+          resolvedAtText: tenantSafeText(row.resolvedAtText || '', 120),
+        };
+      }).filter(Boolean);
+    };
+
     const sanitizePortalMessageState = (input = {}) => {
       const out = {};
       if (!input || typeof input !== 'object' || Array.isArray(input)) return out;
@@ -781,6 +851,21 @@ export default {
       return `${origin}?action=meterPhoto&token=${encodeURIComponent(token)}`;
     };
 
+    const createRepairPhotoViewToken = async (requestId = '', photo = {}) => {
+      const key = assertSafeRepairPhotoKey(photo.key || photo.objectKey || '');
+      if (!key) return '';
+      const token = randomToken().slice(0, 32);
+      await env.DB.put('repairPhotoView:' + token, JSON.stringify({
+        requestId: tenantSafeText(requestId || '', 100),
+        key,
+        mimeType: tenantSafeText(photo.mimeType || '', 80),
+        fileName: tenantSafeText(photo.fileName || '', 180),
+        createdAt: new Date().toISOString(),
+      }), { expirationTtl: 60 * 60 });
+      const origin = new URL(request.url).origin;
+      return `${origin}?action=repairPhoto&token=${encodeURIComponent(token)}`;
+    };
+
     const mergeR2BackupStatus = async (patch = {}) => {
       const current = await getKVJson('r2BackupStatus', {});
       const next = {
@@ -936,7 +1021,7 @@ export default {
         paymentHistory: 'array', expenses: 'array', logs: 'array', slipRefs: 'object',
         monthClosures: 'object', lockedMonths: 'object', arrears: 'object', editHistory: 'array',
         monthlyArchiveIndex: 'object', portalMessageState: 'object', lineRoomMessages: 'object',
-        pendingSlipReviews: 'object', meterPhotos: 'object'
+        pendingSlipReviews: 'object', meterPhotos: 'object', repairRequests: 'array'
       };
       for (const [key, expected] of Object.entries(restoreSchema)) {
         if (data[key] === undefined || data[key] === null) continue;
@@ -966,6 +1051,7 @@ export default {
         ['lineRoomMessages', {}],
         ['pendingSlipReviews', {}],
         ['meterPhotos', {}],
+        ['repairRequests', []],
         ['history', {}],
         ['paymentHistory', []],
         ['expenses', []],
@@ -982,21 +1068,15 @@ export default {
       const restoredKeys = [];
       for (const [key, fallback] of allowed) {
         if (data[key] !== undefined) {
-          const value = key === 'config'
-            ? sanitizeConfig(data[key] || {})
-            : (key === 'tenantProfiles'
-              ? normalizeTenantProfilesMap(data[key] || {})
-              : (key === 'lineTemplates'
-                ? sanitizeLineTemplates(data[key] || {})
-                : (key === 'portalMessageState'
-                  ? sanitizePortalMessageState(data[key] || {})
-                  : (key === 'lineRoomMessages'
-                    ? sanitizeLineRoomMessages(data[key] || {})
-                    : (key === 'pendingSlipReviews'
-                      ? sanitizePendingSlipReviews(data[key] || {})
-                      : (key === 'meterPhotos'
-                        ? sanitizeMeterPhotoMap(data[key] || {})
-                        : data[key] ?? fallback))))));
+          let value = data[key] ?? fallback;
+          if (key === 'config') value = sanitizeConfig(data[key] || {});
+          else if (key === 'tenantProfiles') value = normalizeTenantProfilesMap(data[key] || {});
+          else if (key === 'lineTemplates') value = sanitizeLineTemplates(data[key] || {});
+          else if (key === 'portalMessageState') value = sanitizePortalMessageState(data[key] || {});
+          else if (key === 'lineRoomMessages') value = sanitizeLineRoomMessages(data[key] || {});
+          else if (key === 'pendingSlipReviews') value = sanitizePendingSlipReviews(data[key] || {});
+          else if (key === 'meterPhotos') value = sanitizeMeterPhotoMap(data[key] || {});
+          else if (key === 'repairRequests') value = sanitizeRepairRequests(data[key] || []);
           await putKVJson(key, value);
           restoredKeys.push(key);
         }
@@ -1766,6 +1846,31 @@ export default {
         });
       }
 
+      if (getAction === 'repairPhoto') {
+        if (!env.RENTAL_R2 || typeof env.RENTAL_R2.get !== 'function') {
+          return jsonResponse({ ok: false, error: 'ยังไม่ได้ผูก R2 Bucket Binding ชื่อ RENTAL_R2 กับ Worker' }, 500);
+        }
+        const token = tenantSafeText(getUrl.searchParams.get('token') || '', 80);
+        if (!token) return jsonResponse({ ok: false, error: 'Missing repair photo token' }, 400);
+        const rawToken = await env.DB.get('repairPhotoView:' + token);
+        const view = safeJsonParse(rawToken, null);
+        const key = assertSafeRepairPhotoKey(view?.key || '');
+        if (!view || !key) return jsonResponse({ ok: false, error: 'Repair photo link expired or invalid' }, 404);
+        const obj = await env.RENTAL_R2.get(key);
+        if (!obj) return jsonResponse({ ok: false, error: 'Repair photo not found' }, 404);
+        const contentType = obj.httpMetadata?.contentType || obj.customMetadata?.mimeType || view.mimeType || 'image/jpeg';
+        const fileName = safeTenantFileName(view.fileName || obj.customMetadata?.originalName || key.split('/').pop() || 'repair-photo');
+        return new Response(obj.body, {
+          status: 200,
+          headers: {
+            ...headers,
+            'Content-Type': contentType,
+            'Cache-Control': 'private, no-store',
+            'Content-Disposition': `inline; filename="${fileName.replace(/"/g, '')}"`,
+          },
+        });
+      }
+
       const pin = await env.DB.get('pin');
       const auth = await checkAdminAuth();
       if (!auth.ok) {
@@ -1822,6 +1927,7 @@ export default {
         lineRoomMessages,
         pendingSlipReviews,
         meterPhotos,
+        repairRequests,
       ] = await Promise.all([
         env.DB.get('rooms'),
         env.DB.get('config'),
@@ -1846,6 +1952,7 @@ export default {
         env.DB.get('lineRoomMessages'),
         env.DB.get('pendingSlipReviews'),
         env.DB.get('meterPhotos'),
+        env.DB.get('repairRequests'),
       ]);
 
       const monthlyArchiveIndexObj = safeJsonParse(monthlyArchiveIndex, {});
@@ -1942,6 +2049,7 @@ export default {
         lineRoomMessages: sanitizeLineRoomMessages(safeJsonParse(lineRoomMessages, {})),
         pendingSlipReviews: sanitizePendingSlipReviews(safeJsonParse(pendingSlipReviews, {})),
         meterPhotos: sanitizeMeterPhotoMap(safeJsonParse(meterPhotos, {})),
+        repairRequests: sanitizeRepairRequests(safeJsonParse(repairRequests, [])),
       });
     }
 
@@ -2067,7 +2175,7 @@ export default {
       }
 
       const lineUserId = String(verified.sub || '').trim();
-      const [configRaw, roomsRaw, tenantsRaw, tenantProfilesRaw, arrearsRaw, paymentHistoryRaw, monthlyArchiveIndexRaw, meterPhotosRaw] = await Promise.all([
+      const [configRaw, roomsRaw, tenantsRaw, tenantProfilesRaw, arrearsRaw, paymentHistoryRaw, monthlyArchiveIndexRaw, meterPhotosRaw, repairRequestsRaw] = await Promise.all([
         getKVJson('config', {}),
         getKVJson('rooms', {}),
         getKVJson('tenants', {}),
@@ -2076,6 +2184,7 @@ export default {
         getKVJson('paymentHistory', []),
         getKVJson('monthlyArchiveIndex', {}),
         getKVJson('meterPhotos', {}),
+        getKVJson('repairRequests', []),
       ]);
 
       const cfg = sanitizeConfig(configRaw || {});
@@ -2088,6 +2197,7 @@ export default {
         ? monthlyArchiveIndexRaw
         : {};
       const meterPhotos = sanitizeMeterPhotoMap(meterPhotosRaw || {});
+      const repairRequests = sanitizeRepairRequests(repairRequestsRaw || []);
       const billingMeta = getBillingMetaFromConfig(cfg);
 
       const matchedRoomNums = Object.entries(cfg.userIds || {})
@@ -2251,6 +2361,28 @@ export default {
             }))
         );
 
+        const roomRepairRequests = repairRequests
+          .filter(item => String(item.roomNum || '') === String(roomNum))
+          .filter(item => !historyCutoffMs || portalDateToMs(item.createdAt || item.updatedAt || '') >= historyCutoffMs)
+          .slice()
+          .reverse()
+          .slice(0, 12)
+          .map(item => ({
+            id: item.id,
+            roomNum: item.roomNum,
+            category: item.category,
+            detail: item.detail,
+            status: item.status,
+            adminNote: item.adminNote || '',
+            photoCount: Array.isArray(item.photos) ? item.photos.length : 0,
+            createdAt: item.createdAt,
+            createdAtText: item.createdAtText,
+            updatedAt: item.updatedAt,
+            updatedAtText: item.updatedAtText,
+            resolvedAt: item.resolvedAt,
+            resolvedAtText: item.resolvedAtText,
+          }));
+
         return {
           roomNum,
           tenantName: String(profile.fullName || tenant.name || '').trim(),
@@ -2279,6 +2411,7 @@ export default {
             totalRemaining,
           },
           meterPhotos: meterPhotoHistory,
+          repairRequests: roomRepairRequests,
           arrears: arrearsList,
           history: {
             historyCutoffDate,
@@ -2306,6 +2439,137 @@ export default {
         totals,
         rooms: portalRooms,
       });
+    } else if (body.action === 'createRepairRequest') {
+      const idToken = String(body.idToken || '').trim();
+      const lineLoginChannelId = String(env.LINE_LOGIN_CHANNEL_ID || '').trim();
+      if (!idToken) return jsonResponse({ ok: false, error: 'ไม่พบ LINE ID Token' }, 401);
+      if (!lineLoginChannelId) return jsonResponse({ ok: false, error: 'ยังไม่ได้ตั้งค่า LINE_LOGIN_CHANNEL_ID ใน Worker' }, 500);
+
+      let verifyResponse;
+      let verified = {};
+      try {
+        const verifyBody = new URLSearchParams();
+        verifyBody.set('id_token', idToken);
+        verifyBody.set('client_id', lineLoginChannelId);
+        verifyResponse = await fetch('https://api.line.me/oauth2/v2.1/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: verifyBody,
+        });
+        verified = await verifyResponse.json().catch(() => ({}));
+      } catch (err) {
+        await logEvent({ level: 'error', action: 'repairRequestVerifyToken', message: err?.message || String(err) });
+        return jsonResponse({ ok: false, error: 'ตรวจสอบ LINE ID Token ไม่สำเร็จ' }, 502);
+      }
+      if (!verifyResponse?.ok || !verified?.sub) {
+        return jsonResponse({ ok: false, error: verified?.error_description || verified?.error || 'LINE ID Token ไม่ถูกต้องหรือหมดอายุ' }, 401);
+      }
+
+      const lineUserId = String(verified.sub || '').trim();
+      const cfg = sanitizeConfig(await getKVJson('config', {}));
+      const matchedRoomNums = Object.entries(cfg.userIds || {})
+        .filter(([, userId]) => String(userId || '').trim() === lineUserId)
+        .map(([roomNum]) => String(parseInt(roomNum || 0, 10) || '').trim())
+        .filter(roomNum => roomNum && isValidRoomNum(roomNum) && !isTestRoom(roomNum));
+
+      const roomNum = String(parseInt(body.roomNum || 0, 10) || '').trim();
+      if (!roomNum || !matchedRoomNums.includes(roomNum)) {
+        return jsonResponse({ ok: false, error: 'ห้องนี้ไม่ได้ผูกกับบัญชี LINE ของคุณ' }, 403);
+      }
+
+      const category = tenantSafeText(body.category || 'อื่น ๆ', 80) || 'อื่น ๆ';
+      const detail = tenantSafeText(body.detail || body.message || '', 1500);
+      if (!detail) return jsonResponse({ ok: false, error: 'กรุณาระบุรายละเอียดการแจ้งซ่อม' }, 400);
+
+      const photosInput = Array.isArray(body.photos) ? body.photos.slice(0, 3) : [];
+      if (photosInput.length && (!env.RENTAL_R2 || typeof env.RENTAL_R2.put !== 'function')) {
+        return jsonResponse({ ok: false, error: 'ยังไม่ได้ผูก R2 Bucket Binding ชื่อ RENTAL_R2 กับ Worker' }, 500);
+      }
+
+      const now = new Date();
+      const createdAt = now.toISOString();
+      const createdAtText = thTime(now);
+      const requestId = randomToken().slice(0, 24);
+      const photos = [];
+
+      for (const photoRaw of photosInput) {
+        const photo = photoRaw && typeof photoRaw === 'object' ? photoRaw : {};
+        const mimeType = tenantSafeText(photo.mimeType || '', 80).toLowerCase();
+        if (!REPAIR_PHOTO_ALLOWED_MIME.has(mimeType)) continue;
+        let bytes;
+        try { bytes = decodeBase64Bytes(photo.base64 || photo.data || ''); }
+        catch (_) { continue; }
+        if (!bytes || !bytes.byteLength || bytes.byteLength > MAX_REPAIR_PHOTO_BYTES) continue;
+        const originalName = safeTenantFileName(photo.fileName || 'repair-photo');
+        const ext = repairPhotoExtFromMime(mimeType);
+        const objectKey = `${REPAIR_PHOTO_PREFIX}room-${roomNum}/${createdAt.slice(0,10)}/${Date.now()}-${randomToken().slice(0,12)}-${originalName}.${ext}`;
+        const photoId = randomToken().slice(0, 20);
+        await env.RENTAL_R2.put(objectKey, bytes, {
+          httpMetadata: { contentType: mimeType },
+          customMetadata: {
+            app: 'pananth-rental',
+            category: 'repair-request-photo',
+            roomNum,
+            requestId,
+            originalName,
+            uploadedAt: createdAt,
+            mimeType,
+            photoId,
+          },
+        });
+        photos.push({
+          id: photoId,
+          key: objectKey,
+          fileName: originalName,
+          mimeType,
+          size: bytes.byteLength,
+          uploadedAt: createdAt,
+          uploadedAtText: createdAtText,
+        });
+      }
+
+      const requests = sanitizeRepairRequests(await getKVJson('repairRequests', []));
+      const requestRow = {
+        id: requestId,
+        roomNum,
+        lineUserId,
+        tenantName: tenantSafeText(body.tenantName || verified.name || '', 180),
+        category,
+        detail,
+        status: 'open',
+        statusText: 'รอรับเรื่อง',
+        adminNote: '',
+        photos,
+        createdAt,
+        createdAtText,
+        updatedAt: createdAt,
+        updatedAtText: createdAtText,
+        resolvedAt: '',
+        resolvedAtText: '',
+      };
+      requests.push(requestRow);
+      await putKVJson('repairRequests', sanitizeRepairRequests(requests));
+      await logEvent({ action: 'createRepairRequest', message: 'Tenant submitted repair request', roomNum, extra: { category, photoCount: photos.length } });
+
+      if (TOKEN && OWNER_ID) {
+        try {
+          const ownerMessage = [
+            '??? ?????????????????',
+            '?? ???? ' + roomNum,
+            requestRow.tenantName ? '?? ' + requestRow.tenantName : '',
+            '?? ????: ' + category,
+            '?? ' + detail,
+            photos.length ? '?? ?????? ' + photos.length + ' ???' : '',
+          ].filter(Boolean).join('\n');
+          await pushLine(
+            TOKEN,
+            OWNER_ID,
+            ownerMessage
+          );
+        } catch (_) {}
+      }
+
+      return jsonResponse({ ok: true, request: requestRow });
     } else {
       // savePin อนุญาตเฉพาะกรณีตั้ง PIN ครั้งแรก ถ้ามี PIN แล้วต้องผ่าน admin token
       if (body.action === 'savePin') {
@@ -2322,6 +2586,44 @@ export default {
 
     if (body.action === 'checkAdmin') {
       return jsonResponse({ ok: true });
+    }
+
+    if (body.action === 'getRepairRequests') {
+      const rows = sanitizeRepairRequests(await getKVJson('repairRequests', []));
+      const enriched = await Promise.all(rows.slice().reverse().map(async row => ({
+        ...row,
+        photos: await Promise.all((Array.isArray(row.photos) ? row.photos : []).map(async photo => ({
+          ...photo,
+          viewUrl: await createRepairPhotoViewToken(row.id, photo),
+        }))),
+      })));
+      return jsonResponse({ ok: true, repairRequests: enriched });
+    }
+
+    if (body.action === 'updateRepairRequest') {
+      const requestId = tenantSafeText(body.requestId || body.id || '', 100);
+      const nextStatusRaw = String(body.status || '').trim();
+      const nextStatus = REPAIR_REQUEST_STATUSES.has(nextStatusRaw) ? nextStatusRaw : '';
+      if (!requestId || !nextStatus) return jsonResponse({ ok: false, error: 'ข้อมูลสถานะงานซ่อมไม่ครบ' }, 400);
+      const rows = sanitizeRepairRequests(await getKVJson('repairRequests', []));
+      const target = rows.find(row => String(row.id || '') === requestId);
+      if (!target) return jsonResponse({ ok: false, error: 'ไม่พบรายการแจ้งซ่อม' }, 404);
+      const now = new Date();
+      target.status = nextStatus;
+      target.statusText = nextStatus === 'open' ? 'รอรับเรื่อง' : (nextStatus === 'in_progress' ? 'กำลังดำเนินการ' : (nextStatus === 'done' ? 'เสร็จแล้ว' : 'ปิดงาน'));
+      target.adminNote = tenantSafeText(body.adminNote ?? target.adminNote ?? '', 700);
+      target.updatedAt = now.toISOString();
+      target.updatedAtText = thTime(now);
+      if (nextStatus === 'done' || nextStatus === 'closed') {
+        target.resolvedAt = target.resolvedAt || now.toISOString();
+        target.resolvedAtText = target.resolvedAtText || thTime(now);
+      } else {
+        target.resolvedAt = '';
+        target.resolvedAtText = '';
+      }
+      await putKVJson('repairRequests', sanitizeRepairRequests(rows));
+      await logEvent({ action: 'updateRepairRequest', message: 'Repair request status updated', roomNum: target.roomNum, extra: { requestId, status: nextStatus } });
+      return jsonResponse({ ok: true, request: target, repairRequests: sanitizeRepairRequests(rows) });
     }
 
     // ===== Save actions =====
