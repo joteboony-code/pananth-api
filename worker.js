@@ -1158,12 +1158,12 @@ export default {
       if (isTestRoom(roomNum)) {
         // ห้อง 99 ใช้ทดสอบสลิปเท่านั้น ไม่คิดค่าขยะ และตั้งยอดทดสอบพื้นฐาน 1 บาท
         const rent = Number(roomData.customRent ?? roomData.prorateRent ?? roomData.rent ?? 1) || 1;
-        return rent + elec + water + (Number(roomData.wifi) || 0);
+        return rent + elec + water + Math.max(0, Number(roomData.wifi) || 0);
       }
       const setting = getRoomSettingFromConfig(cfg, roomNum);
       const rent = Number(roomData.prorateRent ?? roomData.rent ?? setting?.rent ?? (r <= 20 ? 2500 : 3000));
       const trash = Number(roomData.trash !== undefined ? roomData.trash : (setting?.trash !== undefined ? setting.trash : 50));
-      return rent + elec + water + trash + (Number(roomData.wifi) || 0);
+      return rent + elec + water + trash + Math.max(0, Number(roomData.wifi) || 0);
     };
 
     const getRoomRentValue = (roomNum, roomData = {}, cfg = {}) => {
@@ -2554,12 +2554,12 @@ export default {
       if (TOKEN && OWNER_ID) {
         try {
           const ownerMessage = [
-            '??? ?????????????????',
-            '?? ???? ' + roomNum,
-            requestRow.tenantName ? '?? ' + requestRow.tenantName : '',
-            '?? ????: ' + category,
-            '?? ' + detail,
-            photos.length ? '?? ?????? ' + photos.length + ' ???' : '',
+            '🛠️ มีการแจ้งซ่อมใหม่',
+            '🏠 ห้อง ' + roomNum,
+            requestRow.tenantName ? '👤 ' + requestRow.tenantName : '',
+            '📌 หมวด: ' + category,
+            '📝 ' + detail,
+            photos.length ? '📷 แนบรูป ' + photos.length + ' รูป' : '',
           ].filter(Boolean).join('\n');
           await pushLine(
             TOKEN,
@@ -3250,11 +3250,12 @@ export default {
         }, 400);
       }
 
-      const [rooms, arrears, paymentHistory, slipRefs] = await Promise.all([
+      const [rooms, arrears, paymentHistory, slipRefs, config] = await Promise.all([
         getKVJson('rooms', {}),
         getKVJson('arrears', {}),
         getKVJson('paymentHistory', []),
         getKVJson('slipRefs', {}),
+        getKVJson('config', {}),
       ]);
 
       if (!Array.isArray(paymentHistory) || paymentHistory.length === 0) {
