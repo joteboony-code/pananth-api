@@ -1,4 +1,4 @@
-// v15.4.2.68: hide repair form in tenant portal; keep repair center backend
+// v15.4.2.70: add workflow tips UI; keep repair center backend
 const DEFAULT_LINE_TEMPLATES = Object.freeze({
   rentNotice: `🏠 {shopName} — ห้อง {room}
 {tenantNameLine}📅 รอบบิล {billingMonth}
@@ -1220,7 +1220,7 @@ export default {
       const values = await Promise.all(keys.map(k => env.DB.get(k)));
       const backup = {
         app: 'pananth-rental',
-        version: 'v15.4.2.68',
+        version: 'v15.4.2.70',
         backupType,
         reason,
         backupId,
