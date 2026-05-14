@@ -1,4 +1,4 @@
-// v15.4.2.65: payment star status on main dashboard and Tenant Portal
+// v15.4.2.64: multi-document upload + editable LINE message templates
 const DEFAULT_LINE_TEMPLATES = Object.freeze({
   rentNotice: `🏠 {shopName} — ห้อง {room}
 {tenantNameLine}📅 รอบบิล {billingMonth}
@@ -860,93 +860,6 @@ export default {
       };
     };
 
-    // ===== PAYMENT STAR STATUS =====
-    // เกณฑ์:
-    // - ชำระหลังเปิดรอบใหม่ และก่อนวันที่ 5 ของเดือนรับชำระ = 5 ดาว
-    // - วันที่ 5-10 ของเดือนรับชำระ = 4 ดาว
-    // - หลังวันที่ 10 = 3 ดาว
-    // รอบที่เปิดก่อนขึ้นเดือนใหม่ เช่น เปิด 29 แล้วจ่าย 29-31 จะอยู่ก่อนวันที่ 5 จึงได้ 5 ดาว
-    const getPaymentCycleOpenedAtFromConfig = (cfg = {}) =>
-      String(cfg.currentPaymentCycleOpenedAt || cfg.paymentCycleOpenedAt || '').trim();
-
-    const paymentStarIsoMs = (value = '') => {
-      const ms = Date.parse(String(value || '').trim());
-      return Number.isFinite(ms) ? ms : 0;
-    };
-
-    const paymentStarWasAfterCycleOpen = (paidAt = '', cycleOpenedAt = '') => {
-      const paidMs = paymentStarIsoMs(paidAt);
-      const openMs = paymentStarIsoMs(cycleOpenedAt);
-      if (!paidMs) return false;
-      // ข้อมูลเก่าก่อนมี currentPaymentCycleOpenedAt ยังให้คำนวณดาวได้
-      if (!openMs) return true;
-      return paidMs >= openMs;
-    };
-
-    const buildPaymentStars = ({ paidAt = '', paidAtText = '', paymentMonthKey = '', cycleOpenedAt = '' } = {}) => {
-      const paidMs = paymentStarIsoMs(paidAt);
-      const key = String(paymentMonthKey || '').trim();
-      if (!paidMs || !/^\d{4}-\d{2}$/.test(key)) return null;
-      if (!paymentStarWasAfterCycleOpen(paidAt, cycleOpenedAt)) return null;
-
-      const day5StartMs = Date.parse(`${key}-05T00:00:00+07:00`);
-      const day11StartMs = Date.parse(`${key}-11T00:00:00+07:00`);
-      if (!Number.isFinite(day5StartMs) || !Number.isFinite(day11StartMs)) return null;
-
-      const stars = paidMs < day5StartMs ? 5 : (paidMs < day11StartMs ? 4 : 3);
-      return {
-        stars,
-        text: '⭐'.repeat(stars),
-        paidAt: String(paidAt || ''),
-        paidAtText: String(paidAtText || paidAt || ''),
-      };
-    };
-
-    const getCurrentCyclePaidAtForStars = ({
-      roomNum = '',
-      room = {},
-      paymentHistory = [],
-      billingMeta = {},
-      cycleOpenedAt = '',
-    } = {}) => {
-      const candidates = [];
-      const explicitPaidAt = String(room?.paidAt || room?.manualPaidAt || '').trim();
-      const explicitPaidAtText = String(room?.paidAtText || room?.manualPaidAtText || explicitPaidAt || '').trim();
-      if (explicitPaidAt && paymentStarWasAfterCycleOpen(explicitPaidAt, cycleOpenedAt)) {
-        candidates.push({ paidAt: explicitPaidAt, paidAtText: explicitPaidAtText, source: 'room' });
-      }
-
-      const targetRoom = String(roomNum || '').trim();
-      const targetBillingMonthKey = String(billingMeta?.billingMonthKey || '').trim();
-      for (const payment of Array.isArray(paymentHistory) ? paymentHistory : []) {
-        if (String(payment?.roomNum || payment?.room || '').trim() !== targetRoom) continue;
-        const appliedItems = Array.isArray(payment?.appliedItems) ? payment.appliedItems : [];
-        const isCurrentCyclePayment = appliedItems.some(item =>
-          String(item?.type || '').trim() === 'current' &&
-          String(item?.monthKey || '').trim() === targetBillingMonthKey
-        );
-        if (!isCurrentCyclePayment) continue;
-
-        const remainingKnown = payment?.remainingTotal !== undefined && payment?.remainingTotal !== null && payment?.remainingTotal !== '';
-        const statusKey = String(payment?.status || '').trim().toLowerCase();
-        const completed = remainingKnown
-          ? Number(payment.remainingTotal || 0) <= 0
-          : (statusKey === 'paid' || statusKey === 'verified');
-        if (!completed) continue;
-
-        const paidAt = String(payment?.paidAt || payment?.createdAt || '').trim();
-        if (!paidAt || !paymentStarWasAfterCycleOpen(paidAt, cycleOpenedAt)) continue;
-        candidates.push({
-          paidAt,
-          paidAtText: String(payment?.paidAtText || payment?.createdAtText || paidAt || '').trim(),
-          source: 'paymentHistory',
-        });
-      }
-
-      candidates.sort((a, b) => paymentStarIsoMs(a.paidAt) - paymentStarIsoMs(b.paidAt));
-      return candidates[0] || null;
-    };
-
     const safeBackupPart = (v, fallback = 'unknown') => String(v || fallback)
       .replace(/[^0-9a-zA-Zก-๙_-]/g, '-')
       .replace(/-+/g, '-')
@@ -961,7 +874,7 @@ export default {
       const values = await Promise.all(keys.map(k => env.DB.get(k)));
       const backup = {
         app: 'pananth-rental',
-        version: 'v15.4.2.65',
+        version: 'v15.4.2.64',
         backupType,
         reason,
         backupId,
@@ -1511,13 +1424,9 @@ export default {
         if (room.manualPaidAmount >= fullTotal) {
           room.paid = true;
           room.manualRemaining = 0;
-          room.paidAt = room.manualPaidAt || new Date().toISOString();
-          room.paidAtText = room.manualPaidAtText || thTime();
         } else {
           room.paid = false;
           room.manualRemaining = fullTotal - room.manualPaidAmount;
-          room.paidAt = '';
-          room.paidAtText = '';
         }
 
         remainingPayment -= appliedCurrent;
@@ -1945,25 +1854,6 @@ export default {
           ? 'vacant'
           : (currentRemaining <= 0 ? 'paid' : (currentPaid > 0 ? 'partial' : 'unpaid'));
 
-        const cycleOpenedAtForStars = getPaymentCycleOpenedAtFromConfig(cfg);
-        const paidAtForStars = status === 'paid'
-          ? getCurrentCyclePaidAtForStars({
-              roomNum,
-              room,
-              paymentHistory,
-              billingMeta,
-              cycleOpenedAt: cycleOpenedAtForStars,
-            })
-          : null;
-        const paymentStars = paidAtForStars
-          ? buildPaymentStars({
-              paidAt: paidAtForStars.paidAt,
-              paidAtText: paidAtForStars.paidAtText,
-              paymentMonthKey: billingMeta.paymentMonthKey,
-              cycleOpenedAt: cycleOpenedAtForStars,
-            })
-          : null;
-
         const historyCutoffDate = String(profile.moveInDate || profile.contractStart || '').trim();
         const historyCutoffMs = portalDateToMs(historyCutoffDate);
         const historyCutoffMonthKey = portalMonthCutoffKey(historyCutoffDate);
@@ -2017,7 +1907,6 @@ export default {
           tenantName: String(profile.fullName || tenant.name || '').trim(),
           status,
           billingMeta,
-          paymentStars,
           meters: {
             ep: Number(room.ep || 0) || 0,
             ec: Number(room.ec || 0) || 0,
