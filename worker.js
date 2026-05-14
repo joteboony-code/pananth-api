@@ -1,4 +1,4 @@
-// v15.4.2.59: tenant portal return-to-LINE-chat button added on frontend
+// v15.4.2.61: tenant LINE OA notifications append Tenant Portal link
 export default {
   // v15.4.2.42: Tenant profile / document center + monthly archive index fix
   async fetch(request, env, ctx) {
@@ -28,6 +28,7 @@ export default {
     const OWNER_ID = env.OWNER_ID;
     const EASYSLIP_API_KEY = env.EASYSLIP_API_KEY;
     const LINE_CHANNEL_SECRET = env.LINE_CHANNEL_SECRET;
+    const TENANT_PORTAL_URL = String(env.TENANT_PORTAL_URL || 'https://liff.line.me/2010080282-Fe44Yy7Z').trim();
     const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
     const PIN_MAX_FAILS = 5;
     const PIN_LOCK_MS = 30 * 60 * 1000;
@@ -697,6 +698,13 @@ export default {
       return { restoredKeys, restoredArchives };
     };
 
+    const appendTenantPortalLink = (to, text = '') => {
+      const base = String(text || '');
+      if (!TENANT_PORTAL_URL || !to || to === OWNER_ID) return base;
+      if (base.includes(TENANT_PORTAL_URL)) return base;
+      return base + '\n\n🏠 ดูข้อมูลค่าเช่าและสถานะล่าสุดใน Tenant Portal:\n' + TENANT_PORTAL_URL;
+    };
+
     const pushLine = async (token, to, text) => {
       if (!token || !to || !text) return { ok: false, error: 'Missing token/to/text' };
 
@@ -708,7 +716,7 @@ export default {
         },
         body: JSON.stringify({
           to,
-          messages: [{ type: 'text', text }],
+          messages: [{ type: 'text', text: appendTenantPortalLink(to, text) }],
         }),
       });
 
@@ -3530,6 +3538,7 @@ export default {
 async function runAutoRentReminder(env) {
   const TOKEN = env.LINE_TOKEN;
   const OWNER_ID = env.OWNER_ID;
+  const TENANT_PORTAL_URL = String(env.TENANT_PORTAL_URL || 'https://liff.line.me/2010080282-Fe44Yy7Z').trim();
 
   const safeJsonParse = (text, fallback) => {
     try { return text ? JSON.parse(text) : fallback; }
@@ -3545,6 +3554,13 @@ async function runAutoRentReminder(env) {
 
   const day = todayBangkok.getDate();
 
+  const appendTenantPortalLink = (to, text = '') => {
+    const base = String(text || '');
+    if (!TENANT_PORTAL_URL || !to || to === OWNER_ID) return base;
+    if (base.includes(TENANT_PORTAL_URL)) return base;
+    return base + '\n\n🏠 ดูข้อมูลค่าเช่าและสถานะล่าสุดใน Tenant Portal:\n' + TENANT_PORTAL_URL;
+  };
+
   const pushLine = async (to, text) => {
     if (!TOKEN || !to || !text) return { ok: false, error: 'Missing token/to/text' };
 
@@ -3556,7 +3572,7 @@ async function runAutoRentReminder(env) {
       },
       body: JSON.stringify({
         to,
-        messages: [{ type: 'text', text }],
+        messages: [{ type: 'text', text: appendTenantPortalLink(to, text) }],
       }),
     });
 
