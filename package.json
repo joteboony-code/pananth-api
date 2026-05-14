@@ -1,6 +1,6 @@
 {
   "name": "pananth-rental-worker",
-  "version": "15.4.2.64",
+  "version": "15.4.2.66",
   "private": true,
   "type": "module",
   "scripts": {

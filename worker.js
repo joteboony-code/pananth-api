@@ -1,4 +1,4 @@
-// v15.4.2.64: multi-document upload + editable LINE message templates
+// v15.4.2.66: portal open tracking + unread reminder + LINE history + payment appointments + pending slip + meter photos
 const DEFAULT_LINE_TEMPLATES = Object.freeze({
   rentNotice: `🏠 {shopName} — ห้อง {room}
 {tenantNameLine}📅 รอบบิล {billingMonth}
@@ -112,6 +112,15 @@ export default {
       'vehicle_registration',
       'guarantor_doc',
       'other',
+    ]);
+
+    // ===== METER PHOTO STORAGE =====
+    const METER_PHOTO_PREFIX = 'meter-photos/';
+    const MAX_METER_PHOTO_BYTES = 4 * 1024 * 1024;
+    const METER_PHOTO_ALLOWED_MIME = new Set([
+      'image/jpeg',
+      'image/png',
+      'image/webp',
     ]);
 
     // ===== TEST ROOM 99 =====
@@ -524,11 +533,253 @@ export default {
         : '';
     };
 
+
+    const assertSafeMeterPhotoKey = (key = '') => {
+      const safeKey = tenantSafeText(key || '', 420);
+      return safeKey.startsWith(METER_PHOTO_PREFIX) && !safeKey.includes('..')
+        ? safeKey
+        : '';
+    };
+
+    const meterPhotoExtFromMime = (mime = '') => {
+      if (mime === 'image/jpeg') return 'jpg';
+      if (mime === 'image/png') return 'png';
+      if (mime === 'image/webp') return 'webp';
+      return 'jpg';
+    };
+
+    const sanitizePortalMessageState = (input = {}) => {
+      const out = {};
+      if (!input || typeof input !== 'object' || Array.isArray(input)) return out;
+      for (const [roomKey, rowRaw] of Object.entries(input || {})) {
+        const roomNum = String(parseInt(rowRaw?.roomNum || roomKey || 0, 10) || '').trim();
+        if (!roomNum || !isValidRoomNum(roomNum)) continue;
+        const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
+        out[roomNum] = {
+          roomNum,
+          lastPortalPromptAt: tenantSafeText(row.lastPortalPromptAt || '', 80),
+          lastPortalPromptAtText: tenantSafeText(row.lastPortalPromptAtText || '', 120),
+          lastPortalPromptKind: tenantSafeText(row.lastPortalPromptKind || '', 80),
+          lastPortalPromptPreview: tenantSafeText(row.lastPortalPromptPreview || '', 240),
+          lastPortalOpenedAt: tenantSafeText(row.lastPortalOpenedAt || '', 80),
+          lastPortalOpenedAtText: tenantSafeText(row.lastPortalOpenedAtText || '', 120),
+          lastPortalOpenedBy: tenantSafeText(row.lastPortalOpenedBy || '', 120),
+          updatedAt: tenantSafeText(row.updatedAt || '', 80),
+          updatedAtText: tenantSafeText(row.updatedAtText || '', 120),
+        };
+      }
+      return out;
+    };
+
+    const sanitizeLineRoomMessages = (input = {}) => {
+      const out = {};
+      if (!input || typeof input !== 'object' || Array.isArray(input)) return out;
+      for (const [roomKey, rowsRaw] of Object.entries(input || {})) {
+        const roomNum = String(parseInt(roomKey || 0, 10) || '').trim();
+        if (!roomNum || !isValidRoomNum(roomNum)) continue;
+        const rows = Array.isArray(rowsRaw) ? rowsRaw : [];
+        out[roomNum] = rows.slice(-120).map(itemRaw => {
+          const item = itemRaw && typeof itemRaw === 'object' ? itemRaw : {};
+          return {
+            id: tenantSafeText(item.id || '', 80),
+            sentAt: tenantSafeText(item.sentAt || item.time || '', 80),
+            sentAtText: tenantSafeText(item.sentAtText || item.timeText || '', 120),
+            kind: tenantSafeText(item.kind || 'message', 80),
+            recipient: tenantSafeText(item.recipient || '', 160),
+            preview: tenantSafeText(item.preview || item.messagePreview || '', 320),
+            message: tenantSafeText(item.message || '', 4500),
+            status: tenantSafeText(item.status || 'sent', 40),
+            source: tenantSafeText(item.source || '', 80),
+          };
+        }).filter(item => item.sentAt || item.sentAtText || item.preview || item.message);
+      }
+      return out;
+    };
+
+    const sanitizePendingSlipReviews = (input = {}) => {
+      const out = {};
+      if (!input || typeof input !== 'object' || Array.isArray(input)) return out;
+      for (const [roomKey, rowRaw] of Object.entries(input || {})) {
+        const roomNum = String(parseInt(rowRaw?.roomNum || roomKey || 0, 10) || '').trim();
+        if (!roomNum || !isValidRoomNum(roomNum)) continue;
+        const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
+        out[roomNum] = {
+          roomNum,
+          createdAt: tenantSafeText(row.createdAt || '', 80),
+          createdAtText: tenantSafeText(row.createdAtText || '', 120),
+          reason: tenantSafeText(row.reason || 'pending-review', 120),
+          note: tenantSafeText(row.note || '', 300),
+          lineUserId: tenantSafeText(row.lineUserId || '', 160),
+          amount: tenantSafeNumber(row.amount || 0, 0),
+          ref: tenantSafeText(row.ref || '', 160),
+          updatedAt: tenantSafeText(row.updatedAt || '', 80),
+          updatedAtText: tenantSafeText(row.updatedAtText || '', 120),
+        };
+      }
+      return out;
+    };
+
+    const sanitizeMeterPhotoMap = (input = {}) => {
+      const out = {};
+      if (!input || typeof input !== 'object' || Array.isArray(input)) return out;
+      for (const [roomKey, rowsRaw] of Object.entries(input || {})) {
+        const roomNum = String(parseInt(roomKey || 0, 10) || '').trim();
+        if (!roomNum || !isValidRoomNum(roomNum)) continue;
+        const rows = Array.isArray(rowsRaw) ? rowsRaw : [];
+        out[roomNum] = rows.slice(-180).map(photoRaw => {
+          const photo = photoRaw && typeof photoRaw === 'object' ? photoRaw : {};
+          const key = assertSafeMeterPhotoKey(photo.key || photo.objectKey || '');
+          if (!key) return null;
+          const meterType = ['electric','water'].includes(String(photo.meterType || '').trim())
+            ? String(photo.meterType || '').trim()
+            : 'electric';
+          return {
+            id: tenantSafeText(photo.id || '', 80),
+            roomNum,
+            meterType,
+            key,
+            fileName: tenantSafeText(photo.fileName || '', 180),
+            mimeType: tenantSafeText(photo.mimeType || '', 80),
+            size: tenantSafeNumber(photo.size || 0, 0),
+            billingMonthKey: tenantSafeText(photo.billingMonthKey || '', 20),
+            billingMonthText: tenantSafeText(photo.billingMonthText || '', 120),
+            paymentMonthKey: tenantSafeText(photo.paymentMonthKey || '', 20),
+            paymentMonthText: tenantSafeText(photo.paymentMonthText || '', 120),
+            prevReading: tenantSafeNumber(photo.prevReading || 0, 0),
+            currReading: tenantSafeNumber(photo.currReading || 0, 0),
+            uploadedAt: tenantSafeText(photo.uploadedAt || '', 80),
+            uploadedAtText: tenantSafeText(photo.uploadedAtText || '', 120),
+          };
+        }).filter(Boolean);
+      }
+      return out;
+    };
+
     const getKVJson = async (key, fallback) =>
       safeJsonParse(await env.DB.get(key), fallback);
 
     const putKVJson = async (key, data) =>
       env.DB.put(key, JSON.stringify(data));
+
+
+    const appendRoomLineHistory = async (roomNum, kind = 'message', text = '', recipient = '', extra = {}) => {
+      const safeRoomNum = String(parseInt(roomNum || 0, 10) || '').trim();
+      if (!safeRoomNum || !isValidRoomNum(safeRoomNum)) return null;
+      const store = sanitizeLineRoomMessages(await getKVJson('lineRoomMessages', {}));
+      const now = new Date();
+      const rows = Array.isArray(store[safeRoomNum]) ? store[safeRoomNum] : [];
+      const cleanText = tenantSafeText(text || '', 4500);
+      const row = {
+        id: randomToken().slice(0, 18),
+        sentAt: now.toISOString(),
+        sentAtText: thTime(now),
+        kind: tenantSafeText(kind || 'message', 80),
+        recipient: tenantSafeText(recipient || '', 160),
+        preview: tenantSafeText(cleanText.replace(/\s+/g, ' ').trim(), 320),
+        message: cleanText,
+        status: tenantSafeText(extra?.status || 'sent', 40),
+        source: tenantSafeText(extra?.source || '', 80),
+      };
+      rows.push(row);
+      store[safeRoomNum] = rows.slice(-120);
+      await putKVJson('lineRoomMessages', store);
+      return row;
+    };
+
+    const markPortalPromptSent = async (roomNum, kind = 'message', text = '') => {
+      const safeRoomNum = String(parseInt(roomNum || 0, 10) || '').trim();
+      if (!safeRoomNum || !isValidRoomNum(safeRoomNum)) return null;
+      const store = sanitizePortalMessageState(await getKVJson('portalMessageState', {}));
+      const now = new Date();
+      const prev = store[safeRoomNum] || { roomNum: safeRoomNum };
+      store[safeRoomNum] = {
+        ...prev,
+        roomNum: safeRoomNum,
+        lastPortalPromptAt: now.toISOString(),
+        lastPortalPromptAtText: thTime(now),
+        lastPortalPromptKind: tenantSafeText(kind || 'message', 80),
+        lastPortalPromptPreview: tenantSafeText(String(text || '').replace(/\s+/g, ' ').trim(), 240),
+        updatedAt: now.toISOString(),
+        updatedAtText: thTime(now),
+      };
+      await putKVJson('portalMessageState', store);
+      return store[safeRoomNum];
+    };
+
+    const markPortalOpened = async (roomNums = [], lineUserId = '') => {
+      const roomsList = Array.from(new Set((Array.isArray(roomNums) ? roomNums : [roomNums])
+        .map(roomNum => String(parseInt(roomNum || 0, 10) || '').trim())
+        .filter(roomNum => roomNum && isValidRoomNum(roomNum))));
+      if (!roomsList.length) return {};
+      const store = sanitizePortalMessageState(await getKVJson('portalMessageState', {}));
+      const now = new Date();
+      roomsList.forEach(roomNum => {
+        const prev = store[roomNum] || { roomNum };
+        store[roomNum] = {
+          ...prev,
+          roomNum,
+          lastPortalOpenedAt: now.toISOString(),
+          lastPortalOpenedAtText: thTime(now),
+          lastPortalOpenedBy: tenantSafeText(lineUserId || '', 120),
+          updatedAt: now.toISOString(),
+          updatedAtText: thTime(now),
+        };
+      });
+      await putKVJson('portalMessageState', store);
+      return store;
+    };
+
+    const setPendingSlipReview = async (roomNums = [], payload = {}) => {
+      const roomsList = Array.from(new Set((Array.isArray(roomNums) ? roomNums : [roomNums])
+        .map(roomNum => String(parseInt(roomNum || 0, 10) || '').trim())
+        .filter(roomNum => roomNum && isValidRoomNum(roomNum))));
+      if (!roomsList.length) return {};
+      const store = sanitizePendingSlipReviews(await getKVJson('pendingSlipReviews', {}));
+      const now = new Date();
+      roomsList.forEach(roomNum => {
+        store[roomNum] = {
+          roomNum,
+          createdAt: store[roomNum]?.createdAt || now.toISOString(),
+          createdAtText: store[roomNum]?.createdAtText || thTime(now),
+          reason: tenantSafeText(payload.reason || 'pending-review', 120),
+          note: tenantSafeText(payload.note || '', 300),
+          lineUserId: tenantSafeText(payload.lineUserId || '', 160),
+          amount: tenantSafeNumber(payload.amount || 0, 0),
+          ref: tenantSafeText(payload.ref || '', 160),
+          updatedAt: now.toISOString(),
+          updatedAtText: thTime(now),
+        };
+      });
+      await putKVJson('pendingSlipReviews', store);
+      return store;
+    };
+
+    const clearPendingSlipReview = async (roomNum) => {
+      const safeRoomNum = String(parseInt(roomNum || 0, 10) || '').trim();
+      if (!safeRoomNum || !isValidRoomNum(safeRoomNum)) return {};
+      const store = sanitizePendingSlipReviews(await getKVJson('pendingSlipReviews', {}));
+      if (store[safeRoomNum]) {
+        delete store[safeRoomNum];
+        await putKVJson('pendingSlipReviews', store);
+      }
+      return store;
+    };
+
+    const createMeterPhotoViewToken = async (roomNum, photo = {}) => {
+      const safeRoomNum = String(parseInt(roomNum || 0, 10) || '').trim();
+      const key = assertSafeMeterPhotoKey(photo.key || photo.objectKey || '');
+      if (!safeRoomNum || !isValidRoomNum(safeRoomNum) || !key) return '';
+      const token = randomToken().slice(0, 32);
+      await env.DB.put('meterPhotoView:' + token, JSON.stringify({
+        roomNum: safeRoomNum,
+        key,
+        mimeType: tenantSafeText(photo.mimeType || '', 80),
+        fileName: tenantSafeText(photo.fileName || '', 180),
+        createdAt: new Date().toISOString(),
+      }), { expirationTtl: 60 * 60 });
+      const origin = new URL(request.url).origin;
+      return `${origin}?action=meterPhoto&token=${encodeURIComponent(token)}`;
+    };
 
     const mergeR2BackupStatus = async (patch = {}) => {
       const current = await getKVJson('r2BackupStatus', {});
@@ -684,7 +935,8 @@ export default {
         rooms: 'object', config: 'object', shopinfo: 'object', tenants: 'object', tenantProfiles: 'object', lineTemplates: 'object', history: 'object',
         paymentHistory: 'array', expenses: 'array', logs: 'array', slipRefs: 'object',
         monthClosures: 'object', lockedMonths: 'object', arrears: 'object', editHistory: 'array',
-        monthlyArchiveIndex: 'object'
+        monthlyArchiveIndex: 'object', portalMessageState: 'object', lineRoomMessages: 'object',
+        pendingSlipReviews: 'object', meterPhotos: 'object'
       };
       for (const [key, expected] of Object.entries(restoreSchema)) {
         if (data[key] === undefined || data[key] === null) continue;
@@ -710,6 +962,10 @@ export default {
         ['tenants', {}],
         ['tenantProfiles', {}],
         ['lineTemplates', {}],
+        ['portalMessageState', {}],
+        ['lineRoomMessages', {}],
+        ['pendingSlipReviews', {}],
+        ['meterPhotos', {}],
         ['history', {}],
         ['paymentHistory', []],
         ['expenses', []],
@@ -730,7 +986,17 @@ export default {
             ? sanitizeConfig(data[key] || {})
             : (key === 'tenantProfiles'
               ? normalizeTenantProfilesMap(data[key] || {})
-              : (key === 'lineTemplates' ? sanitizeLineTemplates(data[key] || {}) : data[key] ?? fallback));
+              : (key === 'lineTemplates'
+                ? sanitizeLineTemplates(data[key] || {})
+                : (key === 'portalMessageState'
+                  ? sanitizePortalMessageState(data[key] || {})
+                  : (key === 'lineRoomMessages'
+                    ? sanitizeLineRoomMessages(data[key] || {})
+                    : (key === 'pendingSlipReviews'
+                      ? sanitizePendingSlipReviews(data[key] || {})
+                      : (key === 'meterPhotos'
+                        ? sanitizeMeterPhotoMap(data[key] || {})
+                        : data[key] ?? fallback))))));
           await putKVJson(key, value);
           restoredKeys.push(key);
         }
@@ -870,11 +1136,11 @@ export default {
       const now = new Date();
       const pad = n => String(n).padStart(2, '0');
       const backupId = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-      const keys = ['rooms','config','shopinfo','tenants','tenantProfiles','lineTemplates','history','paymentHistory','expenses','logs','slipRefs','monthClosures','lockedMonths','lastCloseBackup','arrears','editHistory','monthlyArchiveIndex'];
+      const keys = ['rooms','config','shopinfo','tenants','tenantProfiles','lineTemplates','portalMessageState','lineRoomMessages','pendingSlipReviews','meterPhotos','history','paymentHistory','expenses','logs','slipRefs','monthClosures','lockedMonths','lastCloseBackup','arrears','editHistory','monthlyArchiveIndex'];
       const values = await Promise.all(keys.map(k => env.DB.get(k)));
       const backup = {
         app: 'pananth-rental',
-        version: 'v15.4.2.64',
+        version: 'v15.4.2.66',
         backupType,
         reason,
         backupId,
@@ -887,7 +1153,21 @@ export default {
       keys.forEach((k, idx) => {
         const fallback = k === 'paymentHistory' || k === 'expenses' || k === 'logs' || k === 'editHistory' ? [] : (k === 'lastCloseBackup' ? null : {});
         const parsed = safeJsonParse(values[idx], fallback);
-        backup[k] = k === 'config' ? sanitizeConfig(parsed || {}) : (k === 'tenantProfiles' ? normalizeTenantProfilesMap(parsed || {}) : (k === 'lineTemplates' ? sanitizeLineTemplates(parsed || {}) : parsed));
+        backup[k] = k === 'config'
+          ? sanitizeConfig(parsed || {})
+          : (k === 'tenantProfiles'
+            ? normalizeTenantProfilesMap(parsed || {})
+            : (k === 'lineTemplates'
+              ? sanitizeLineTemplates(parsed || {})
+              : (k === 'portalMessageState'
+                ? sanitizePortalMessageState(parsed || {})
+                : (k === 'lineRoomMessages'
+                  ? sanitizeLineRoomMessages(parsed || {})
+                  : (k === 'pendingSlipReviews'
+                    ? sanitizePendingSlipReviews(parsed || {})
+                    : (k === 'meterPhotos'
+                      ? sanitizeMeterPhotoMap(parsed || {})
+                      : parsed))))));
       });
 
       const cfgMeta = getBillingMetaFromConfig(backup.config || {});
@@ -1457,6 +1737,35 @@ export default {
 
     // ===== GET =====
     if (request.method === 'GET') {
+      const getUrl = new URL(request.url);
+      const getAction = String(getUrl.searchParams.get('action') || '').trim();
+
+      // Tenant Portal meter photo view: one-hour short-lived token, no admin session required.
+      if (getAction === 'meterPhoto') {
+        if (!env.RENTAL_R2 || typeof env.RENTAL_R2.get !== 'function') {
+          return jsonResponse({ ok: false, error: 'ยังไม่ได้ผูก R2 Bucket Binding ชื่อ RENTAL_R2 กับ Worker' }, 500);
+        }
+        const token = tenantSafeText(getUrl.searchParams.get('token') || '', 80);
+        if (!token) return jsonResponse({ ok: false, error: 'Missing meter photo token' }, 400);
+        const rawToken = await env.DB.get('meterPhotoView:' + token);
+        const view = safeJsonParse(rawToken, null);
+        const key = assertSafeMeterPhotoKey(view?.key || '');
+        if (!view || !key) return jsonResponse({ ok: false, error: 'Meter photo link expired or invalid' }, 404);
+        const obj = await env.RENTAL_R2.get(key);
+        if (!obj) return jsonResponse({ ok: false, error: 'Meter photo not found' }, 404);
+        const contentType = obj.httpMetadata?.contentType || obj.customMetadata?.mimeType || view.mimeType || 'image/jpeg';
+        const fileName = safeTenantFileName(view.fileName || obj.customMetadata?.originalName || key.split('/').pop() || 'meter-photo');
+        return new Response(obj.body, {
+          status: 200,
+          headers: {
+            ...headers,
+            'Content-Type': contentType,
+            'Cache-Control': 'private, no-store',
+            'Content-Disposition': `inline; filename="${fileName.replace(/"/g, '')}"`,
+          },
+        });
+      }
+
       const pin = await env.DB.get('pin');
       const auth = await checkAdminAuth();
       if (!auth.ok) {
@@ -1468,8 +1777,6 @@ export default {
         });
       }
 
-      const getUrl = new URL(request.url);
-      const getAction = String(getUrl.searchParams.get('action') || '').trim();
       if (getAction === 'tenantDocument') {
         if (!env.RENTAL_R2 || typeof env.RENTAL_R2.get !== 'function') {
           return jsonResponse({ ok: false, error: 'ยังไม่ได้ผูก R2 Bucket Binding ชื่อ RENTAL_R2 กับ Worker' }, 500);
@@ -1511,6 +1818,10 @@ export default {
         monthlyArchiveIndex,
         r2BackupIndex,
         r2BackupStatus,
+        portalMessageState,
+        lineRoomMessages,
+        pendingSlipReviews,
+        meterPhotos,
       ] = await Promise.all([
         env.DB.get('rooms'),
         env.DB.get('config'),
@@ -1531,6 +1842,10 @@ export default {
         env.DB.get('monthlyArchiveIndex'),
         env.DB.get('r2BackupIndex'),
         env.DB.get('r2BackupStatus'),
+        env.DB.get('portalMessageState'),
+        env.DB.get('lineRoomMessages'),
+        env.DB.get('pendingSlipReviews'),
+        env.DB.get('meterPhotos'),
       ]);
 
       const monthlyArchiveIndexObj = safeJsonParse(monthlyArchiveIndex, {});
@@ -1623,6 +1938,10 @@ export default {
         monthlyArchives,
         r2BackupIndex: safeJsonParse(r2BackupIndex, []),
         r2BackupStatus: safeJsonParse(r2BackupStatus, {}),
+        portalMessageState: sanitizePortalMessageState(safeJsonParse(portalMessageState, {})),
+        lineRoomMessages: sanitizeLineRoomMessages(safeJsonParse(lineRoomMessages, {})),
+        pendingSlipReviews: sanitizePendingSlipReviews(safeJsonParse(pendingSlipReviews, {})),
+        meterPhotos: sanitizeMeterPhotoMap(safeJsonParse(meterPhotos, {})),
       });
     }
 
@@ -1748,7 +2067,7 @@ export default {
       }
 
       const lineUserId = String(verified.sub || '').trim();
-      const [configRaw, roomsRaw, tenantsRaw, tenantProfilesRaw, arrearsRaw, paymentHistoryRaw, monthlyArchiveIndexRaw] = await Promise.all([
+      const [configRaw, roomsRaw, tenantsRaw, tenantProfilesRaw, arrearsRaw, paymentHistoryRaw, monthlyArchiveIndexRaw, meterPhotosRaw] = await Promise.all([
         getKVJson('config', {}),
         getKVJson('rooms', {}),
         getKVJson('tenants', {}),
@@ -1756,6 +2075,7 @@ export default {
         getKVJson('arrears', {}),
         getKVJson('paymentHistory', []),
         getKVJson('monthlyArchiveIndex', {}),
+        getKVJson('meterPhotos', {}),
       ]);
 
       const cfg = sanitizeConfig(configRaw || {});
@@ -1767,6 +2087,7 @@ export default {
       const monthlyArchiveIndex = monthlyArchiveIndexRaw && typeof monthlyArchiveIndexRaw === 'object'
         ? monthlyArchiveIndexRaw
         : {};
+      const meterPhotos = sanitizeMeterPhotoMap(meterPhotosRaw || {});
       const billingMeta = getBillingMetaFromConfig(cfg);
 
       const matchedRoomNums = Object.entries(cfg.userIds || {})
@@ -1774,6 +2095,10 @@ export default {
         .map(([roomNum]) => String(parseInt(roomNum || 0, 10) || '').trim())
         .filter(roomNum => roomNum && isValidRoomNum(roomNum) && !isTestRoom(roomNum))
         .sort((a, b) => Number(a) - Number(b));
+
+      if (matchedRoomNums.length) {
+        await markPortalOpened(matchedRoomNums, lineUserId);
+      }
 
       const portalMonthCutoffKey = (dateText = '') => {
         const m = String(dateText || '').trim().match(/^(\d{4})-(\d{2})-\d{2}/);
@@ -1824,7 +2149,7 @@ export default {
         return map[raw] || raw || '-';
       };
 
-      const portalRooms = matchedRoomNums.map(roomNum => {
+      const portalRooms = await Promise.all(matchedRoomNums.map(async roomNum => {
         const room = rooms?.[roomNum] || rooms?.[Number(roomNum)] || {};
         const profile = tenantProfiles?.[roomNum] || {};
         const tenant = tenants?.[roomNum] || tenants?.[Number(roomNum)] || {};
@@ -1902,6 +2227,30 @@ export default {
               .slice(0, 8)
           : [];
 
+        const roomMeterPhotos = Array.isArray(meterPhotos?.[roomNum]) ? meterPhotos[roomNum] : [];
+        const meterPhotoSource = historyCutoffMs
+          ? roomMeterPhotos.filter(photo => portalDateToMs(photo.uploadedAt || '') >= historyCutoffMs)
+          : [];
+        const meterPhotoHistory = await Promise.all(
+          meterPhotoSource
+            .slice()
+            .sort((a, b) => String(b.uploadedAt || '').localeCompare(String(a.uploadedAt || '')))
+            .slice(0, 36)
+            .map(async photo => ({
+              id: photo.id || '',
+              meterType: photo.meterType || '',
+              billingMonthKey: photo.billingMonthKey || '',
+              billingMonthText: photo.billingMonthText || '',
+              paymentMonthKey: photo.paymentMonthKey || '',
+              paymentMonthText: photo.paymentMonthText || '',
+              prevReading: Number(photo.prevReading || 0) || 0,
+              currReading: Number(photo.currReading || 0) || 0,
+              uploadedAt: photo.uploadedAt || '',
+              uploadedAtText: photo.uploadedAtText || '',
+              viewUrl: await createMeterPhotoViewToken(roomNum, photo),
+            }))
+        );
+
         return {
           roomNum,
           tenantName: String(profile.fullName || tenant.name || '').trim(),
@@ -1929,6 +2278,7 @@ export default {
             arrearsTotal,
             totalRemaining,
           },
+          meterPhotos: meterPhotoHistory,
           arrears: arrearsList,
           history: {
             historyCutoffDate,
@@ -1937,7 +2287,7 @@ export default {
             archives: historyArchives,
           },
         };
-      });
+      }));
 
       const totals = portalRooms.reduce((acc, room) => {
         acc.totalCurrentRemaining += Number(room?.amounts?.currentRemaining || 0);
@@ -2093,6 +2443,103 @@ export default {
         extra: { docType, objectKey, size: bytes.byteLength, fileName: originalName },
       });
       return jsonResponse({ ok: true, tenantProfiles: profiles, profile: profiles[roomNum], document: nextDocument });
+    }
+
+    if (body.action === 'uploadMeterPhoto') {
+      if (!env.RENTAL_R2 || typeof env.RENTAL_R2.put !== 'function') {
+        return jsonResponse({ ok: false, error: 'ยังไม่ได้ผูก R2 Bucket Binding ชื่อ RENTAL_R2 กับ Worker' }, 500);
+      }
+
+      const roomNum = String(parseInt(body.roomNum || 0, 10) || '').trim();
+      if (!roomNum || !isValidRoomNum(roomNum)) {
+        return jsonResponse({ ok: false, error: 'Invalid room number' }, 400);
+      }
+
+      const meterType = ['electric','water'].includes(String(body.meterType || '').trim())
+        ? String(body.meterType || '').trim()
+        : '';
+      if (!meterType) {
+        return jsonResponse({ ok: false, error: 'ระบุประเภทมิเตอร์เป็น electric หรือ water' }, 400);
+      }
+
+      const mimeType = tenantSafeText(body.mimeType || '', 80).toLowerCase();
+      if (!METER_PHOTO_ALLOWED_MIME.has(mimeType)) {
+        return jsonResponse({ ok: false, error: 'รองรับเฉพาะ JPG, PNG และ WEBP' }, 400);
+      }
+
+      let bytes;
+      try {
+        bytes = decodeBase64Bytes(body.base64 || body.data || '');
+      } catch (_) {
+        return jsonResponse({ ok: false, error: 'อ่านรูปมิเตอร์ไม่สำเร็จ' }, 400);
+      }
+      if (!bytes || !bytes.byteLength) return jsonResponse({ ok: false, error: 'รูปว่างหรืออ่านไม่ได้' }, 400);
+      if (bytes.byteLength > MAX_METER_PHOTO_BYTES) {
+        return jsonResponse({ ok: false, error: 'รูปมิเตอร์ใหญ่เกิน 4 MB' }, 413);
+      }
+
+      const billingMeta = getBillingMetaFromConfig(sanitizeConfig(await getKVJson('config', {})));
+      const uploadedAtDate = new Date();
+      const uploadedAt = uploadedAtDate.toISOString();
+      const uploadedAtText = thTime(uploadedAtDate);
+      const originalName = safeTenantFileName(body.fileName || `meter-${meterType}`);
+      const ext = meterPhotoExtFromMime(mimeType);
+      const objectKey = `${METER_PHOTO_PREFIX}room-${roomNum}/${meterType}/${billingMeta.billingMonthKey || 'unknown-cycle'}/${Date.now()}-${randomToken().slice(0,12)}-${originalName}.${ext}`;
+      const photoId = randomToken().slice(0, 24);
+
+      const prevReading = tenantSafeNumber(body.prevReading || body.previous || 0, 0);
+      const currReading = tenantSafeNumber(body.currReading || body.current || 0, 0);
+
+      await env.RENTAL_R2.put(objectKey, bytes, {
+        httpMetadata: { contentType: mimeType },
+        customMetadata: {
+          app: 'pananth-rental',
+          category: 'meter-photo',
+          roomNum,
+          meterType,
+          billingMonthKey: billingMeta.billingMonthKey || '',
+          billingMonthText: billingMeta.billingMonthText || '',
+          paymentMonthKey: billingMeta.paymentMonthKey || '',
+          paymentMonthText: billingMeta.paymentMonthText || '',
+          prevReading: String(prevReading),
+          currReading: String(currReading),
+          originalName,
+          uploadedAt,
+          mimeType,
+          photoId,
+        },
+      });
+
+      const store = sanitizeMeterPhotoMap(await getKVJson('meterPhotos', {}));
+      const rows = Array.isArray(store[roomNum]) ? store[roomNum] : [];
+      const photo = {
+        id: photoId,
+        roomNum,
+        meterType,
+        key: objectKey,
+        fileName: originalName,
+        mimeType,
+        size: bytes.byteLength,
+        billingMonthKey: billingMeta.billingMonthKey || '',
+        billingMonthText: billingMeta.billingMonthText || '',
+        paymentMonthKey: billingMeta.paymentMonthKey || '',
+        paymentMonthText: billingMeta.paymentMonthText || '',
+        prevReading,
+        currReading,
+        uploadedAt,
+        uploadedAtText,
+      };
+      rows.push(photo);
+      store[roomNum] = rows.slice(-180);
+      await putKVJson('meterPhotos', store);
+      await logEvent({
+        action: 'uploadMeterPhoto',
+        message: 'Meter photo uploaded',
+        roomNum,
+        extra: { meterType, objectKey, size: bytes.byteLength, prevReading, currReading },
+      });
+
+      return jsonResponse({ ok: true, meterPhotos: store, photo });
     }
 
     if (body.action === 'deleteTenantDocument') {
@@ -2899,6 +3346,10 @@ export default {
             portalUrl: TENANT_PORTAL_URL,
           }, lineTemplates);
           tenantNotify = await pushLine(TOKEN, userId, notifyText);
+          if (tenantNotify?.ok) {
+            await appendRoomLineHistory(roomNum, 'paymentConfirmation', notifyText, userId, { source: 'manual-payment' });
+            await markPortalPromptSent(roomNum, 'paymentConfirmation', notifyText);
+          }
         }
         paymentRecord.tenantNotify = tenantNotify;
       }
@@ -2906,11 +3357,18 @@ export default {
       paymentHistory.push(paymentRecord);
       while (paymentHistory.length > 1000) paymentHistory.shift();
 
+      if (result.remainingTotal <= 0 && config?.reminderMuteRooms) {
+        delete config.reminderMuteRooms[roomNum];
+        delete config.reminderMuteRooms[String(roomNum)];
+      }
+
       await Promise.all([
         putKVJson('rooms', rooms),
         putKVJson('arrears', arrears),
         putKVJson('paymentHistory', paymentHistory),
+        putKVJson('config', sanitizeConfig(config || {})),
       ]);
+      await clearPendingSlipReview(roomNum);
 
       await logEvent({
         action: 'manualPayment',
@@ -2948,6 +3406,110 @@ export default {
       return jsonResponse({ ok: true, roomNum: TEST_ROOM_KEY, room: rooms[TEST_ROOM_KEY] });
     }
 
+
+    if (body.action === 'clearPendingSlipReview') {
+      const roomNum = String(parseInt(body.roomNum || 0, 10) || '').trim();
+      if (!roomNum || !isValidRoomNum(roomNum)) {
+        return jsonResponse({ ok: false, error: 'Invalid room number' }, 400);
+      }
+      const pendingSlipReviews = await clearPendingSlipReview(roomNum);
+      await logEvent({
+        action: 'clearPendingSlipReview',
+        message: 'Pending slip review cleared from admin',
+        roomNum,
+      });
+      return jsonResponse({ ok: true, roomNum, pendingSlipReviews });
+    }
+
+    if (body.action === 'sendPortalUnreadReminders') {
+      const [configRaw, roomsRaw, tenantsRaw, portalStateRaw] = await Promise.all([
+        getKVJson('config', {}),
+        getKVJson('rooms', {}),
+        getKVJson('tenants', {}),
+        getKVJson('portalMessageState', {}),
+      ]);
+      const cfg = sanitizeConfig(configRaw || {});
+      const roomsData = roomsRaw && typeof roomsRaw === 'object' ? roomsRaw : {};
+      const tenantsData = tenantsRaw && typeof tenantsRaw === 'object' ? tenantsRaw : {};
+      const portalState = sanitizePortalMessageState(portalStateRaw || {});
+      const candidates = Object.values(portalState || {}).filter(row => {
+        const promptMs = Date.parse(row.lastPortalPromptAt || '') || 0;
+        const openedMs = Date.parse(row.lastPortalOpenedAt || '') || 0;
+        if (!promptMs || openedMs >= promptMs) return false;
+        const roomNum = String(parseInt(row.roomNum || 0, 10) || '').trim();
+        if (!roomNum || !isValidRoomNum(roomNum) || isTestRoom(roomNum)) return false;
+        const room = roomsData?.[roomNum] || roomsData?.[Number(roomNum)] || {};
+        if (room?.vacant === true) return false;
+        const userId = String(cfg.userIds?.[roomNum] || cfg.userIds?.[Number(roomNum)] || '').trim();
+        return !!userId;
+      });
+
+      const recipientMap = new Map();
+      for (const row of candidates) {
+        const roomNum = String(row.roomNum || '');
+        const userId = String(cfg.userIds?.[roomNum] || cfg.userIds?.[Number(roomNum)] || '').trim();
+        if (!userId) continue;
+        if (!recipientMap.has(userId)) recipientMap.set(userId, { userId, rooms: [] });
+        recipientMap.get(userId).rooms.push(roomNum);
+      }
+
+      let sentCount = 0;
+      let failedCount = 0;
+      const sentRooms = [];
+      const failedRooms = [];
+      for (const recipient of recipientMap.values()) {
+        const roomNums = recipient.rooms.slice().sort((a, b) => Number(a) - Number(b));
+        const roomText = roomNums.length === 1 ? `ห้อง ${roomNums[0]}` : `ห้อง ${roomNums.join(', ')}`;
+        const tenantName = roomNums.length === 1
+          ? String(tenantsData?.[roomNums[0]]?.name || tenantsData?.[Number(roomNums[0])]?.name || '').trim()
+          : '';
+        const message =
+`🔔 แจ้งเตือนตรวจสอบ Tenant Portal
+${tenantName ? `คุณ ${tenantName}\n` : ''}${roomText}
+กรุณากดเปิด Portal เพื่อตรวจสอบข้อมูลค่าเช่าและสถานะล่าสุดครับ`;
+        try {
+          const result = await pushLine(TOKEN, recipient.userId, message);
+          if (result?.ok) {
+            sentCount += 1;
+            sentRooms.push(...roomNums);
+            for (const roomNum of roomNums) {
+              await appendRoomLineHistory(roomNum, 'portalUnreadReminder', message, recipient.userId, { source: 'web-admin' });
+              await markPortalPromptSent(roomNum, 'portalUnreadReminder', message);
+            }
+          } else {
+            failedCount += 1;
+            failedRooms.push(...roomNums);
+          }
+        } catch (_) {
+          failedCount += 1;
+          failedRooms.push(...roomNums);
+        }
+      }
+
+      await logEvent({
+        action: 'sendPortalUnreadReminders',
+        message: 'Send reminders to tenants who have not opened Tenant Portal',
+        extra: {
+          candidateRooms: candidates.map(row => row.roomNum),
+          uniqueRecipientCount: recipientMap.size,
+          sentCount,
+          failedCount,
+          sentRooms,
+          failedRooms,
+        },
+      });
+
+      return jsonResponse({
+        ok: failedCount === 0,
+        partial: failedCount > 0,
+        candidateRoomCount: candidates.length,
+        uniqueRecipientCount: recipientMap.size,
+        sentCount,
+        failedCount,
+        sentRooms,
+        failedRooms,
+      }, failedCount === 0 ? 200 : 207);
+    }
 
     if (body.action === 'sendTenantBroadcast') {
       const message = String(body.message || '').trim();
@@ -3027,8 +3589,13 @@ export default {
           }, lineTemplates);
           const result = await pushLine(TOKEN, recipient.userId, renderedAnnouncement);
           const ok = !!result?.ok;
-          if (ok) sentCount += 1;
-          else failedCount += 1;
+          if (ok) {
+            sentCount += 1;
+            for (const roomNum of recipient.roomNums || []) {
+              await appendRoomLineHistory(roomNum, 'announcement', renderedAnnouncement, recipient.userId, { source: 'web-broadcast' });
+              await markPortalPromptSent(roomNum, 'announcement', renderedAnnouncement);
+            }
+          } else failedCount += 1;
           results.push({
             ok,
             roomNums: recipient.roomNums,
@@ -3110,6 +3677,12 @@ export default {
     if (body.userId && body.message && !body.events) {
       try {
         const result = await pushLine(TOKEN, body.userId, body.message);
+        const roomNum = String(parseInt(body.roomNum || 0, 10) || '').trim();
+        const messageKind = tenantSafeText(body.messageKind || 'webPush', 80);
+        if (result.ok && roomNum && isValidRoomNum(roomNum)) {
+          await appendRoomLineHistory(roomNum, messageKind, body.message, body.userId, { source: 'web' });
+          await markPortalPromptSent(roomNum, messageKind, body.message);
+        }
         if (!result.ok) {
           await logEvent({ level: 'error', action: 'pushLineFromWeb', message: JSON.stringify(result) });
         }
@@ -3162,6 +3735,10 @@ export default {
               const lineTemplates = sanitizeLineTemplates(safeJsonParse(lineTemplatesData, {}));
               let roomNum = null;
               let roomInfo = describeUserRooms(cfg, ten, userId);
+              const linkedRoomNums = Object.entries(cfg.userIds || {})
+                .filter(([, linkedUserId]) => String(linkedUserId || '').trim() === String(userId || '').trim())
+                .map(([linkedRoomNum]) => String(parseInt(linkedRoomNum || 0, 10) || '').trim())
+                .filter(linkedRoomNum => linkedRoomNum && isValidRoomNum(linkedRoomNum));
 
               let slipData = null;
               let slipCheckError = '';
@@ -3193,12 +3770,21 @@ export default {
                   '\n\n⚠️ ตรวจไม่ได้ กรุณาตรวจสอบด้วยตนเองครับ' +
                   (slipCheckError ? '\n\nสาเหตุ: ' + slipCheckError : '');
 
+                if (linkedRoomNums.length) {
+                  await setPendingSlipReview(linkedRoomNums, {
+                    reason: 'slip-verify-failed',
+                    note: slipCheckError || 'ตรวจสลิปไม่ได้',
+                    lineUserId: userId,
+                  });
+                }
+
                 await pushLine(TOKEN, OWNER_ID, msg);
                 await logEvent({
                   level: 'error',
                   action: 'verifySlipFailed',
                   message: slipCheckError || 'EasySlip no data',
                   roomNum,
+                  extra: { linkedRoomNums },
                 });
                 continue;
               }
@@ -3271,6 +3857,17 @@ export default {
                     '\nแต่ระบบยังไม่สามารถเลือกห้องได้อัตโนมัติ' +
                     '\nกรุณารอเจ้าของตรวจสอบก่อนครับ'
                 );
+
+                const candidateRoomNums = (matchRoom.candidates || [])
+                  .map(c => String(parseInt(c?.roomNum || 0, 10) || '').trim())
+                  .filter(candidateRoomNum => candidateRoomNum && isValidRoomNum(candidateRoomNum));
+                await setPendingSlipReview(candidateRoomNums.length ? candidateRoomNums : linkedRoomNums, {
+                  reason: 'slip-room-match-failed',
+                  note: matchRoom.reason || 'เลือกห้องไม่ได้อัตโนมัติ',
+                  lineUserId: userId,
+                  amount: slipAmount,
+                  ref,
+                });
 
                 await pushLine(
                   TOKEN,
@@ -3400,12 +3997,19 @@ export default {
 
                 while (paymentHistory.length > 1000) paymentHistory.shift();
 
+                if (applyResult.remainingTotal <= 0 && cfg?.reminderMuteRooms) {
+                  delete cfg.reminderMuteRooms[roomNum];
+                  delete cfg.reminderMuteRooms[String(roomNum)];
+                }
+
                 await Promise.all([
                   putKVJson('rooms', rms),
                   putKVJson('arrears', arrears),
                   putKVJson('slipRefs', slipRefs),
                   putKVJson('paymentHistory', paymentHistory),
+                  putKVJson('config', sanitizeConfig(cfg || {})),
                 ]);
+                await clearPendingSlipReview(roomNum);
 
                 if (isTestRoom(roomNum)) {
                   await pushLine(
@@ -3435,20 +4039,21 @@ export default {
                 }
 
                 if (status === 'verified') {
-                  await pushLine(
-                    TOKEN,
-                    userId,
-                    renderLineTemplate('paymentConfirmation', {
-                      paymentTitle: 'ตรวจสอบสลิปเรียบร้อยครับ',
-                      room: roomInfo || roomNum || '-',
-                      billingMonth: billingMeta.billingMonthText || '-',
-                      status: 'ชำระแล้ว',
-                      paidAmount: slipAmount.toLocaleString('th-TH'),
-                      remaining: '0',
-                      paymentNote: 'สถานะห้องของคุณถูกอัปเดตเป็น “ชำระแล้ว” แล้วครับ 😊',
-                      portalUrl: TENANT_PORTAL_URL,
-                    }, lineTemplates)
-                  );
+                  const tenantPaymentMessage = renderLineTemplate('paymentConfirmation', {
+                    paymentTitle: 'ตรวจสอบสลิปเรียบร้อยครับ',
+                    room: roomInfo || roomNum || '-',
+                    billingMonth: billingMeta.billingMonthText || '-',
+                    status: 'ชำระแล้ว',
+                    paidAmount: slipAmount.toLocaleString('th-TH'),
+                    remaining: '0',
+                    paymentNote: 'สถานะห้องของคุณถูกอัปเดตเป็น “ชำระแล้ว” แล้วครับ 😊',
+                    portalUrl: TENANT_PORTAL_URL,
+                  }, lineTemplates);
+                  const tenantPaymentPush = await pushLine(TOKEN, userId, tenantPaymentMessage);
+                  if (tenantPaymentPush?.ok) {
+                    await appendRoomLineHistory(roomNum, 'paymentConfirmation', tenantPaymentMessage, userId, { source: 'easy-slip' });
+                    await markPortalPromptSent(roomNum, 'paymentConfirmation', tenantPaymentMessage);
+                  }
 
                   await pushLine(
                     TOKEN,
@@ -3462,20 +4067,21 @@ export default {
                       '\n🔢 Ref: ' + ref
                   );
                 } else {
-                  await pushLine(
-                    TOKEN,
-                    userId,
-                    renderLineTemplate('paymentConfirmation', {
-                      paymentTitle: 'ได้รับสลิปและบันทึกยอดชำระแล้วครับ',
-                      room: roomInfo || roomNum || '-',
-                      billingMonth: billingMeta.billingMonthText || '-',
-                      status: 'รับชำระบางส่วน',
-                      paidAmount: slipAmount.toLocaleString('th-TH'),
-                      remaining: applyResult.remainingTotal.toLocaleString('th-TH'),
-                      paymentNote: 'กรุณาชำระยอดคงเหลือภายหลังครับ',
-                      portalUrl: TENANT_PORTAL_URL,
-                    }, lineTemplates)
-                  );
+                  const tenantPartialMessage = renderLineTemplate('paymentConfirmation', {
+                    paymentTitle: 'ได้รับสลิปและบันทึกยอดชำระแล้วครับ',
+                    room: roomInfo || roomNum || '-',
+                    billingMonth: billingMeta.billingMonthText || '-',
+                    status: 'รับชำระบางส่วน',
+                    paidAmount: slipAmount.toLocaleString('th-TH'),
+                    remaining: applyResult.remainingTotal.toLocaleString('th-TH'),
+                    paymentNote: 'กรุณาชำระยอดคงเหลือภายหลังครับ',
+                    portalUrl: TENANT_PORTAL_URL,
+                  }, lineTemplates);
+                  const tenantPartialPush = await pushLine(TOKEN, userId, tenantPartialMessage);
+                  if (tenantPartialPush?.ok) {
+                    await appendRoomLineHistory(roomNum, 'paymentConfirmation', tenantPartialMessage, userId, { source: 'easy-slip' });
+                    await markPortalPromptSent(roomNum, 'paymentConfirmation', tenantPartialMessage);
+                  }
 
                   await pushLine(
                     TOKEN,
@@ -3686,6 +4292,51 @@ async function runAutoRentReminder(env) {
 
   const putKVJson = async (key, data) =>
     env.DB.put(key, JSON.stringify(data));
+
+  const safeText = (value = '', max = 4500) => String(value ?? '').trim().slice(0, max);
+
+  const appendRoomLineHistory = async (roomNum, kind = 'autoReminder', text = '', recipient = '') => {
+    const safeRoomNum = String(parseInt(roomNum || 0, 10) || '').trim();
+    if (!safeRoomNum) return;
+    const storeRaw = await getKVJson('lineRoomMessages', {});
+    const store = storeRaw && typeof storeRaw === 'object' && !Array.isArray(storeRaw) ? storeRaw : {};
+    const rows = Array.isArray(store[safeRoomNum]) ? store[safeRoomNum] : [];
+    const now = new Date();
+    const cleanText = safeText(text, 4500);
+    rows.push({
+      id: `${Date.now()}-${safeRoomNum}`,
+      sentAt: now.toISOString(),
+      sentAtText: thTime(now),
+      kind: safeText(kind, 80),
+      recipient: safeText(recipient, 160),
+      preview: safeText(cleanText.replace(/\s+/g, ' '), 320),
+      message: cleanText,
+      status: 'sent',
+      source: 'cron',
+    });
+    store[safeRoomNum] = rows.slice(-120);
+    await putKVJson('lineRoomMessages', store);
+  };
+
+  const markPortalPromptSent = async (roomNum, kind = 'autoReminder', text = '') => {
+    const safeRoomNum = String(parseInt(roomNum || 0, 10) || '').trim();
+    if (!safeRoomNum) return;
+    const storeRaw = await getKVJson('portalMessageState', {});
+    const store = storeRaw && typeof storeRaw === 'object' && !Array.isArray(storeRaw) ? storeRaw : {};
+    const now = new Date();
+    const prev = store[safeRoomNum] && typeof store[safeRoomNum] === 'object' ? store[safeRoomNum] : {};
+    store[safeRoomNum] = {
+      ...prev,
+      roomNum: safeRoomNum,
+      lastPortalPromptAt: now.toISOString(),
+      lastPortalPromptAtText: thTime(now),
+      lastPortalPromptKind: safeText(kind, 80),
+      lastPortalPromptPreview: safeText(String(text || '').replace(/\s+/g, ' '), 240),
+      updatedAt: now.toISOString(),
+      updatedAtText: thTime(now),
+    };
+    await putKVJson('portalMessageState', store);
+  };
 
   const logEvent = async ({
     level = 'info',
@@ -3900,6 +4551,8 @@ async function runAutoRentReminder(env) {
       if (result.ok) {
         sent++;
         sentRooms.push(`ห้อง ${i}: ${totalDue.toLocaleString('th-TH')}฿`);
+        await appendRoomLineHistory(i, 'overdueReminder', message, userId);
+        await markPortalPromptSent(i, 'overdueReminder', message);
 
         await logEvent({
           action: 'autoReminderSent',
@@ -3936,7 +4589,7 @@ async function runAutoRentReminder(env) {
 ❌ ส่งไม่สำเร็จ: ${failed} ห้อง
 ✓ ไม่มีหนี้/ชำระแล้ว ข้าม: ${skippedPaid} ห้อง
 🔕 งดแจ้งถาวร ข้าม: ${skippedMuted} ห้อง
-⏸️ งดถึงวันที่ ข้าม: ${skippedUntilDay} ห้อง
+📅 นัดชำระ/งดถึงวันที่ ข้าม: ${skippedUntilDay} ห้อง
 ⚠️ ไม่มี User ID: ${skippedNoUserId} ห้อง
 
 💰 ยอดค้างที่แจ้งรวม: ${totalAmount.toLocaleString('th-TH')}฿
