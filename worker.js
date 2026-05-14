@@ -1,4 +1,4 @@
-// v15.4.2.70: add workflow tips UI; keep repair center backend
+// v15.4.2.71: dashboard assistant notifications checklist and quick tips UI
 const DEFAULT_LINE_TEMPLATES = Object.freeze({
   rentNotice: `🏠 {shopName} — ห้อง {room}
 {tenantNameLine}📅 รอบบิล {billingMonth}
@@ -1220,7 +1220,7 @@ export default {
       const values = await Promise.all(keys.map(k => env.DB.get(k)));
       const backup = {
         app: 'pananth-rental',
-        version: 'v15.4.2.70',
+        version: 'v15.4.2.71',
         backupType,
         reason,
         backupId,
