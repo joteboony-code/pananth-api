@@ -1,4 +1,4 @@
-// v15.4.2.72: LINE OA quota check for tenant broadcast
+// v15.4.2.72: LINE OA quota dashboard + v15.4.2.71 owner assistant checklist/tips UI
 const DEFAULT_LINE_TEMPLATES = Object.freeze({
   rentNotice: `🏠 {shopName} — ห้อง {room}
 {tenantNameLine}📅 รอบบิล {billingMonth}
@@ -1151,6 +1151,68 @@ export default {
       return { ok: res.ok, status: res.status, result };
     };
 
+
+    // v15.4.2.72: LINE OA monthly quota / usage summary for owner dashboard
+    const getLineMessageQuotaSummary = async () => {
+      if (!TOKEN) {
+        return {
+          ok: false,
+          configured: false,
+          error: 'ยังไม่ได้ตั้งค่า LINE_TOKEN ใน Worker',
+        };
+      }
+
+      const requestOptions = {
+        method: 'GET',
+        headers: { Authorization: 'Bearer ' + TOKEN },
+      };
+
+      const [quotaRes, usageRes] = await Promise.all([
+        fetch('https://api.line.me/v2/bot/message/quota', requestOptions),
+        fetch('https://api.line.me/v2/bot/message/quota/consumption', requestOptions),
+      ]);
+
+      let quota = {};
+      let usage = {};
+      try { quota = await quotaRes.json(); } catch (_) {}
+      try { usage = await usageRes.json(); } catch (_) {}
+
+      if (!quotaRes.ok || !usageRes.ok) {
+        const quotaError = quota?.message || quota?.error || '';
+        const usageError = usage?.message || usage?.error || '';
+        const error = quotaError || usageError || `LINE quota API error (${quotaRes.status}/${usageRes.status})`;
+        return {
+          ok: false,
+          configured: true,
+          error,
+          quotaStatus: quotaRes.status,
+          usageStatus: usageRes.status,
+        };
+      }
+
+      const type = String(quota?.type || '').trim() || 'unknown';
+      const totalUsage = Math.max(0, Number(usage?.totalUsage || 0) || 0);
+      const limit = type === 'limited' ? Math.max(0, Number(quota?.value || 0) || 0) : null;
+      const remaining = type === 'limited' ? Math.max(0, limit - totalUsage) : null;
+      const usedPercent = type === 'limited' && limit > 0
+        ? Math.min(100, Math.max(0, Math.round((totalUsage / limit) * 1000) / 10))
+        : null;
+      const now = new Date();
+
+      return {
+        ok: true,
+        configured: true,
+        type,
+        limit,
+        totalUsage,
+        remaining,
+        usedPercent,
+        fetchedAt: now.toISOString(),
+        fetchedAtText: thTime(now),
+        note: 'ยอดใช้ไปเป็นค่าประมาณการจาก LINE API และรวมข้อความที่ส่งจาก LINE Official Account Manager ด้วย',
+      };
+    };
+
     const calcExpectedAmount = (roomNum, roomData = {}, cfg = {}) => {
       const r = parseInt(roomNum, 10);
       const elec = ((Number(roomData.ec) || 0) - (Number(roomData.ep) || 0)) * 8;
@@ -1220,7 +1282,7 @@ export default {
       const values = await Promise.all(keys.map(k => env.DB.get(k)));
       const backup = {
         app: 'pananth-rental',
-        version: 'v15.4.2.72',
+        version: 'v15.4.2.71',
         backupType,
         reason,
         backupId,
@@ -2588,37 +2650,23 @@ export default {
       return jsonResponse({ ok: true });
     }
 
-    if (body.action === 'getLineQuota') {
-      const lineToken = String(env.LINE_CHANNEL_ACCESS_TOKEN || TOKEN || '').trim();
-      if (!lineToken) {
-        return jsonResponse({ ok: false, error: 'ยังไม่ได้ตั้งค่า LINE_TOKEN หรือ LINE_CHANNEL_ACCESS_TOKEN ใน Cloudflare Secret' }, 500);
+    if (body.action === 'getLineMessageQuota') {
+      const lineMessageQuota = await getLineMessageQuotaSummary();
+      if (!lineMessageQuota.ok) {
+        await logEvent({
+          level: 'warn',
+          action: 'getLineMessageQuota',
+          message: 'Failed to fetch LINE message quota',
+          extra: {
+            configured: lineMessageQuota.configured !== false,
+            error: lineMessageQuota.error || '',
+            quotaStatus: lineMessageQuota.quotaStatus || 0,
+            usageStatus: lineMessageQuota.usageStatus || 0,
+          },
+        });
+        return jsonResponse({ ok: false, lineMessageQuota, error: lineMessageQuota.error || 'โหลดโควตา LINE ไม่สำเร็จ' }, 502);
       }
-
-      const lineHeaders = { Authorization: `Bearer ${lineToken}` };
-      const [quotaRes, consumptionRes] = await Promise.all([
-        fetch('https://api.line.me/v2/bot/message/quota', { headers: lineHeaders }),
-        fetch('https://api.line.me/v2/bot/message/quota/consumption', { headers: lineHeaders }),
-      ]);
-
-      if (!quotaRes.ok || !consumptionRes.ok) {
-        const detail = await (quotaRes.ok ? consumptionRes.text() : quotaRes.text());
-        return jsonResponse({ ok: false, error: 'ไม่สามารถดึงข้อมูลโควต้า LINE ได้', detail }, 502);
-      }
-
-      const quota = await quotaRes.json();
-      const consumption = await consumptionRes.json();
-      const type = quota.type || 'none';
-      const monthlyLimit = type === 'limited' ? Number(quota.value || 0) : null;
-      const used = Number(consumption.totalUsage || 0);
-      const remaining = monthlyLimit === null ? null : Math.max(0, monthlyLimit - used);
-
-      return jsonResponse({
-        ok: true,
-        type,
-        monthlyLimit,
-        used,
-        remaining,
-      });
+      return jsonResponse({ ok: true, lineMessageQuota });
     }
 
     if (body.action === 'getRepairRequests') {

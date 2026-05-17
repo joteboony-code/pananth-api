@@ -99,3 +99,9 @@ https://white-rice-cf72.joteboony.workers.dev/
 - เพิ่ม public action `getTenantPortalData`
 - ตรวจสอบ LIFF ID Token กับ LINE Verify ID Token API
 - ต้องตั้ง Worker variable `LINE_LOGIN_CHANNEL_ID`
+
+
+## v15.4.2.72 LINE quota API
+- เพิ่ม action `getLineMessageQuota` สำหรับหน้าเจ้าของ
+- เรียก LINE Messaging API `/v2/bot/message/quota` และ `/v2/bot/message/quota/consumption`
+- คืนค่า limit / totalUsage / remaining / usedPercent
