@@ -1,4 +1,4 @@
-// v15.4.2.71: dashboard assistant notifications checklist and quick tips UI
+// v15.4.2.72: LINE OA quota check for tenant broadcast
 const DEFAULT_LINE_TEMPLATES = Object.freeze({
   rentNotice: `🏠 {shopName} — ห้อง {room}
 {tenantNameLine}📅 รอบบิล {billingMonth}
@@ -1220,7 +1220,7 @@ export default {
       const values = await Promise.all(keys.map(k => env.DB.get(k)));
       const backup = {
         app: 'pananth-rental',
-        version: 'v15.4.2.71',
+        version: 'v15.4.2.72',
         backupType,
         reason,
         backupId,
@@ -2586,6 +2586,39 @@ export default {
 
     if (body.action === 'checkAdmin') {
       return jsonResponse({ ok: true });
+    }
+
+    if (body.action === 'getLineQuota') {
+      const lineToken = String(env.LINE_CHANNEL_ACCESS_TOKEN || TOKEN || '').trim();
+      if (!lineToken) {
+        return jsonResponse({ ok: false, error: 'ยังไม่ได้ตั้งค่า LINE_TOKEN หรือ LINE_CHANNEL_ACCESS_TOKEN ใน Cloudflare Secret' }, 500);
+      }
+
+      const lineHeaders = { Authorization: `Bearer ${lineToken}` };
+      const [quotaRes, consumptionRes] = await Promise.all([
+        fetch('https://api.line.me/v2/bot/message/quota', { headers: lineHeaders }),
+        fetch('https://api.line.me/v2/bot/message/quota/consumption', { headers: lineHeaders }),
+      ]);
+
+      if (!quotaRes.ok || !consumptionRes.ok) {
+        const detail = await (quotaRes.ok ? consumptionRes.text() : quotaRes.text());
+        return jsonResponse({ ok: false, error: 'ไม่สามารถดึงข้อมูลโควต้า LINE ได้', detail }, 502);
+      }
+
+      const quota = await quotaRes.json();
+      const consumption = await consumptionRes.json();
+      const type = quota.type || 'none';
+      const monthlyLimit = type === 'limited' ? Number(quota.value || 0) : null;
+      const used = Number(consumption.totalUsage || 0);
+      const remaining = monthlyLimit === null ? null : Math.max(0, monthlyLimit - used);
+
+      return jsonResponse({
+        ok: true,
+        type,
+        monthlyLimit,
+        used,
+        remaining,
+      });
     }
 
     if (body.action === 'getRepairRequests') {
