@@ -1,4 +1,4 @@
-// v15.4.2.72: LINE OA quota dashboard + v15.4.2.71 owner assistant checklist/tips UI
+// v15.4.2.73: HTML hash routing support + LINE OA quota APIs
 const DEFAULT_LINE_TEMPLATES = Object.freeze({
   rentNotice: `🏠 {shopName} — ห้อง {room}
 {tenantNameLine}📅 รอบบิล {billingMonth}
@@ -1151,20 +1151,19 @@ export default {
       return { ok: res.ok, status: res.status, result };
     };
 
-
-    // v15.4.2.72: LINE OA monthly quota / usage summary for owner dashboard
     const getLineMessageQuotaSummary = async () => {
-      if (!TOKEN) {
+      const lineToken = String(env.LINE_CHANNEL_ACCESS_TOKEN || TOKEN || '').trim();
+      if (!lineToken) {
         return {
           ok: false,
           configured: false,
-          error: 'ยังไม่ได้ตั้งค่า LINE_TOKEN ใน Worker',
+          error: 'ยังไม่ได้ตั้งค่า LINE_TOKEN หรือ LINE_CHANNEL_ACCESS_TOKEN ใน Cloudflare Secret',
         };
       }
 
       const requestOptions = {
         method: 'GET',
-        headers: { Authorization: 'Bearer ' + TOKEN },
+        headers: { Authorization: 'Bearer ' + lineToken },
       };
 
       const [quotaRes, usageRes] = await Promise.all([
@@ -1207,6 +1206,8 @@ export default {
         totalUsage,
         remaining,
         usedPercent,
+        monthlyLimit: limit,
+        used: totalUsage,
         fetchedAt: now.toISOString(),
         fetchedAtText: thTime(now),
         note: 'ยอดใช้ไปเป็นค่าประมาณการจาก LINE API และรวมข้อความที่ส่งจาก LINE Official Account Manager ด้วย',
@@ -1282,7 +1283,7 @@ export default {
       const values = await Promise.all(keys.map(k => env.DB.get(k)));
       const backup = {
         app: 'pananth-rental',
-        version: 'v15.4.2.71',
+        version: 'v15.4.2.73',
         backupType,
         reason,
         backupId,
@@ -2669,6 +2670,19 @@ export default {
       return jsonResponse({ ok: true, lineMessageQuota });
     }
 
+    if (body.action === 'getLineQuota') {
+      const lineMessageQuota = await getLineMessageQuotaSummary();
+      if (!lineMessageQuota.ok) {
+        return jsonResponse({ ok: false, error: lineMessageQuota.error || 'ไม่สามารถดึงข้อมูลโควต้า LINE ได้' }, 502);
+      }
+      return jsonResponse({
+        ok: true,
+        type: lineMessageQuota.type,
+        monthlyLimit: lineMessageQuota.monthlyLimit,
+        used: lineMessageQuota.used,
+        remaining: lineMessageQuota.remaining,
+      });
+    }
     if (body.action === 'getRepairRequests') {
       const rows = sanitizeRepairRequests(await getKVJson('repairRequests', []));
       const enriched = await Promise.all(rows.slice().reverse().map(async row => ({
