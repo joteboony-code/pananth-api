@@ -2928,6 +2928,16 @@ export default {
       if (previousPairToken) {
         const previousPair = await getLinePairTokenRecord(previousPairToken);
         if (previousPair.record && previousPair.status === 'active') {
+          if (String(body.reuseActive || '').trim() === '1') {
+            return jsonResponse({
+              ok: true,
+              roomNum,
+              token: previousPairToken,
+              expiresAt: previousPair.record.expiresAt || '',
+              expiresAtText: previousPair.record.expiresAtText || '',
+              reused: true,
+            });
+          }
           const cancelledAtDate = new Date();
           const cancelledRecord = {
             ...(previousPair.record || {}),
@@ -2960,18 +2970,29 @@ export default {
         expiresAtText: thTime(expiresAtDate),
       };
 
-      await env.DB.put(linePairTokenKey(token), JSON.stringify(record), {
-        expirationTtl: Math.ceil(LINE_PAIR_TOKEN_TTL_MS / 1000) + 300,
-      });
-      await env.DB.put(linePairRoomKey(roomNum), token, {
-        expirationTtl: Math.ceil(LINE_PAIR_TOKEN_TTL_MS / 1000) + 300,
-      });
+      try {
+        await env.DB.put(linePairTokenKey(token), JSON.stringify(record), {
+          expirationTtl: Math.ceil(LINE_PAIR_TOKEN_TTL_MS / 1000) + 300,
+        });
+        await env.DB.put(linePairRoomKey(roomNum), token, {
+          expirationTtl: Math.ceil(LINE_PAIR_TOKEN_TTL_MS / 1000) + 300,
+        });
+      } catch (err) {
+        return jsonResponse({
+          ok: false,
+          error: 'Cloudflare KV write quota เต็มชั่วคราว กรุณาลองใหม่หลัง 07:00 น. หรืออัปเกรด Workers Paid plan',
+          detail: err?.message || String(err || ''),
+          quotaExceeded: true,
+        }, 429);
+      }
 
-      await logEvent({
-        action: 'createLinePairToken',
-        message: 'Created QR LIFF pairing token for room',
-        roomNum,
-      });
+      try {
+        await logEvent({
+          action: 'createLinePairToken',
+          message: 'Created QR LIFF pairing token for room',
+          roomNum,
+        });
+      } catch (_) {}
 
       return jsonResponse({
         ok: true,
