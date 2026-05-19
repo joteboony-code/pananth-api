@@ -281,24 +281,49 @@ export default {
       return isValidPinHash(pinHash) ? pinHash : '';
     };
 
-    const hashPinOnWorker = async (pin = '') => {
-      const safePin = String(pin || '').trim();
-      if (!/^\d{6}$/.test(safePin)) return '';
-      const raw = new TextEncoder().encode(safePin + 'pananth_salt_2569');
+    const sha256Hex = async (text = '') => {
+      const raw = new TextEncoder().encode(String(text || ''));
       const digest = await crypto.subtle.digest('SHA-256', raw);
       return Array.from(new Uint8Array(digest))
         .map((b) => b.toString(16).padStart(2, '0'))
         .join('');
     };
 
+    const hashPinOnWorker = async (pin = '') => {
+      const safePin = String(pin || '').trim();
+      if (!/^\d{6}$/.test(safePin)) return '';
+      return sha256Hex(safePin + 'pananth_salt_2569');
+    };
+
+    const getAdminTokenSecret = async () => {
+      const storedPin = normalizeStoredPinHash(await env.DB.get('pin'));
+      return storedPin + ':' + ADMIN_UNLOCK_KEY + ':pananth-admin-session-v2';
+    };
+
+    const createStatelessAdminToken = async (expiresAtMs) => {
+      const expiresHex = Math.max(0, Number(expiresAtMs || 0)).toString(16).padStart(12, '0').slice(-12);
+      const secret = await getAdminTokenSecret();
+      const sig = await sha256Hex('admin:' + expiresHex + ':' + secret);
+      return expiresHex + sig.slice(0, 52);
+    };
+
+    const verifyStatelessAdminToken = async (token = '') => {
+      const safeToken = String(token || '').trim();
+      if (!/^[a-f0-9]{64}$/i.test(safeToken)) return { ok: false, reason: 'bad-token' };
+      const expiresHex = safeToken.slice(0, 12);
+      const expiresAtMs = parseInt(expiresHex, 16);
+      if (!Number.isFinite(expiresAtMs) || Date.now() > expiresAtMs) return { ok: false, reason: 'expired-token' };
+      const expected = await createStatelessAdminToken(expiresAtMs);
+      return timingSafeEqual(safeToken, expected)
+        ? { ok: true, token: safeToken, session: { expiresAt: new Date(expiresAtMs).toISOString(), stateless: true } }
+        : { ok: false, reason: 'invalid-token' };
+    };
+
     const createAdminSession = async () => {
-      const token = randomToken();
       const now = Date.now();
-      const expiresAt = new Date(now + ADMIN_SESSION_TTL_MS).toISOString();
-      await env.DB.put('adminSession:' + token, JSON.stringify({
-        createdAt: new Date(now).toISOString(),
-        expiresAt,
-      }), { expirationTtl: Math.ceil(ADMIN_SESSION_TTL_MS / 1000) });
+      const expiresAtMs = now + ADMIN_SESSION_TTL_MS;
+      const expiresAt = new Date(expiresAtMs).toISOString();
+      const token = await createStatelessAdminToken(expiresAtMs);
       return { token, expiresAt };
     };
 
@@ -309,7 +334,7 @@ export default {
       const token = getAdminToken();
       if (!token || !/^[a-f0-9]{64}$/i.test(token)) return { ok: false, reason: 'missing-token' };
       const raw = await env.DB.get('adminSession:' + token);
-      if (!raw) return { ok: false, reason: 'invalid-token' };
+      if (!raw) return verifyStatelessAdminToken(token);
       const session = safeJsonParse(raw, null);
       if (!session || !session.expiresAt || Date.now() > new Date(session.expiresAt).getTime()) {
         try { await env.DB.delete('adminSession:' + token); } catch (_) {}
@@ -2187,43 +2212,56 @@ export default {
     }
 
     if (body.action === 'verifyPin') {
-      const storedPin = normalizeStoredPinHash(await env.DB.get('pin'));
-      const incomingHash = String(body.pinHash || body.data || '').trim();
-      const rawPin = String(body.pin || '').trim();
-      const pinHash = isValidPinHash(incomingHash)
-        ? incomingHash
-        : await hashPinOnWorker(rawPin);
-      const lockState = await getPinLockState();
+      try {
+        const storedPin = normalizeStoredPinHash(await env.DB.get('pin'));
+        const incomingHash = String(body.pinHash || body.data || '').trim();
+        const rawPin = String(body.pin || '').trim();
+        const pinHash = isValidPinHash(incomingHash)
+          ? incomingHash
+          : await hashPinOnWorker(rawPin);
+        const lockState = await getPinLockState();
 
-      if (lockState.locked) {
+        if (lockState.locked) {
+          return jsonResponse({
+            ok: false,
+            error: 'PIN locked',
+            locked: true,
+            lockedUntil: lockState.lockedUntil,
+            remainingMs: lockState.remainingMs,
+          }, 423);
+        }
+
+        if (!storedPin) return jsonResponse({ ok: false, pinEnabled: false, needSet: true }, 400);
+
+        if (!isValidPinHash(pinHash) || !timingSafeEqual(pinHash, storedPin)) {
+          let nextLock = null;
+          try {
+            nextLock = await recordPinFailure();
+          } catch (_) {
+            nextLock = { locked: false, lockedUntil: '', remainingMs: 0, remainingAttempts: PIN_MAX_FAILS };
+          }
+          await logEvent({ level: 'warn', action: 'verifyPin', message: nextLock.locked ? 'PIN verify failed: locked' : 'PIN verify failed', extra: { remainingAttempts: nextLock.remainingAttempts, locked: nextLock.locked, lockedUntil: nextLock.lockedUntil || '' } });
+          return jsonResponse({
+            ok: false,
+            error: nextLock.locked ? 'PIN locked' : 'Invalid PIN',
+            locked: nextLock.locked,
+            lockedUntil: nextLock.lockedUntil || '',
+            remainingMs: nextLock.remainingMs || 0,
+            remainingAttempts: nextLock.remainingAttempts,
+          }, nextLock.locked ? 423 : 401);
+        }
+
+        await resetPinLockState();
+        const session = await createAdminSession();
+        await logEvent({ action: 'verifyPin', message: 'Admin PIN verified' });
+        return jsonResponse({ ok: true, token: session.token, expiresAt: session.expiresAt, remainingAttempts: PIN_MAX_FAILS });
+      } catch (err) {
         return jsonResponse({
           ok: false,
-          error: 'PIN locked',
-          locked: true,
-          lockedUntil: lockState.lockedUntil,
-          remainingMs: lockState.remainingMs,
-        }, 423);
+          error: 'PIN verify internal error',
+          detail: err?.message || String(err || ''),
+        }, 500);
       }
-
-      if (!storedPin) return jsonResponse({ ok: false, pinEnabled: false, needSet: true }, 400);
-
-      if (!/^[a-f0-9]{64}$/i.test(pinHash) || !timingSafeEqual(pinHash, storedPin)) {
-        const nextLock = await recordPinFailure();
-        await logEvent({ level: 'warn', action: 'verifyPin', message: nextLock.locked ? 'PIN verify failed: locked' : 'PIN verify failed', extra: { remainingAttempts: nextLock.remainingAttempts, locked: nextLock.locked, lockedUntil: nextLock.lockedUntil || '' } });
-        return jsonResponse({
-          ok: false,
-          error: nextLock.locked ? 'PIN locked' : 'Invalid PIN',
-          locked: nextLock.locked,
-          lockedUntil: nextLock.lockedUntil || '',
-          remainingMs: nextLock.remainingMs || 0,
-          remainingAttempts: nextLock.remainingAttempts,
-        }, nextLock.locked ? 423 : 401);
-      }
-
-      await resetPinLockState();
-      const session = await createAdminSession();
-      await logEvent({ action: 'verifyPin', message: 'Admin PIN verified' });
-      return jsonResponse({ ok: true, token: session.token, expiresAt: session.expiresAt, remainingAttempts: PIN_MAX_FAILS });
     }
 
     if (body.action === 'emergencyUnlockPin') {
