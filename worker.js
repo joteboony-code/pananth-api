@@ -1,4 +1,4 @@
-// v15.4.2.77: QR LIFF new-tenant room pairing ready + LINE OA quota APIs
+// v15.4.2.78: QR LIFF new-tenant room pairing LIFF check fix + LINE OA quota APIs
 const DEFAULT_LINE_TEMPLATES = Object.freeze({
   rentNotice: `🏠 {shopName} — ห้อง {room}
 {tenantNameLine}📅 รอบบิล {billingMonth}
@@ -1309,7 +1309,7 @@ export default {
       const values = await Promise.all(keys.map(k => env.DB.get(k)));
       const backup = {
         app: 'pananth-rental',
-        version: 'v15.4.2.77',
+        version: 'v15.4.2.78',
         backupType,
         reason,
         backupId,
