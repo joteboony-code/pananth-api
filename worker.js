@@ -1,4 +1,4 @@
-// v15.4.2.73: HTML hash routing support + LINE OA quota APIs
+// v15.4.2.77: QR LIFF new-tenant room pairing ready + LINE OA quota APIs
 const DEFAULT_LINE_TEMPLATES = Object.freeze({
   rentNotice: `🏠 {shopName} — ห้อง {room}
 {tenantNameLine}📅 รอบบิล {billingMonth}
@@ -231,6 +231,32 @@ export default {
       const bytes = new Uint8Array(32);
       crypto.getRandomValues(bytes);
       return bytesToHex(bytes);
+    };
+
+
+    // ===== QR / LIFF จับคู่ LINE ผู้เช่าใหม่ =====
+    const LINE_PAIR_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+    const LINE_PAIR_TOKEN_PREFIX = 'linePairToken:';
+
+    const normalizeLinePairToken = (token = '') => {
+      const safe = String(token || '').trim().toLowerCase();
+      return /^[a-f0-9]{64}$/i.test(safe) ? safe : '';
+    };
+
+    const linePairTokenKey = (token = '') =>
+      LINE_PAIR_TOKEN_PREFIX + normalizeLinePairToken(token);
+
+    const getLinePairTokenRecord = async (token = '') => {
+      const safe = normalizeLinePairToken(token);
+      if (!safe) return { token: '', record: null, status: 'invalid' };
+      const raw = await env.DB.get(linePairTokenKey(safe));
+      const record = safeJsonParse(raw, null);
+      if (!record || typeof record !== 'object') return { token: safe, record: null, status: 'missing' };
+      const expiresMs = Date.parse(record.expiresAt || '');
+      if (!expiresMs || Date.now() > expiresMs) {
+        return { token: safe, record, status: 'expired' };
+      }
+      return { token: safe, record, status: record.used ? 'used' : 'active' };
     };
 
     const timingSafeEqual = (a, b) => {
@@ -1283,7 +1309,7 @@ export default {
       const values = await Promise.all(keys.map(k => env.DB.get(k)));
       const backup = {
         app: 'pananth-rental',
-        version: 'v15.4.2.73',
+        version: 'v15.4.2.77',
         backupType,
         reason,
         backupId,
@@ -2633,6 +2659,134 @@ export default {
       }
 
       return jsonResponse({ ok: true, request: requestRow });
+    } else if (body.action === 'inspectLinePairToken') {
+      const pair = await getLinePairTokenRecord(body.token || body.pairToken || '');
+      if (pair.status === 'invalid') {
+        return jsonResponse({ ok: false, error: 'ลิงก์จับคู่ไม่ถูกต้อง' }, 400);
+      }
+      if (pair.status === 'missing' || pair.status === 'expired') {
+        return jsonResponse({ ok: false, error: 'ลิงก์จับคู่หมดอายุหรือไม่พบรายการนี้' }, 410);
+      }
+
+      const roomNum = String(parseInt(pair.record?.roomNum || 0, 10) || '').trim();
+      if (!roomNum || !isValidRoomNum(roomNum)) {
+        return jsonResponse({ ok: false, error: 'เลขห้องในลิงก์ไม่ถูกต้อง' }, 400);
+      }
+
+      const cfg = sanitizeConfig(await getKVJson('config', {}));
+      const roomHasLine = !!String(cfg.userIds?.[roomNum] || '').trim();
+
+      return jsonResponse({
+        ok: true,
+        roomNum,
+        expiresAt: pair.record.expiresAt || '',
+        expiresAtText: pair.record.expiresAtText || '',
+        used: pair.status === 'used',
+        alreadyLinked: roomHasLine,
+      });
+    } else if (body.action === 'completeLinePairToken') {
+      const pair = await getLinePairTokenRecord(body.token || body.pairToken || '');
+      if (pair.status === 'invalid') {
+        return jsonResponse({ ok: false, error: 'ลิงก์จับคู่ไม่ถูกต้อง' }, 400);
+      }
+      if (pair.status === 'missing' || pair.status === 'expired') {
+        return jsonResponse({ ok: false, error: 'ลิงก์จับคู่หมดอายุหรือไม่พบรายการนี้' }, 410);
+      }
+      if (pair.status === 'used') {
+        return jsonResponse({ ok: false, error: 'QR นี้ถูกใช้จับคู่แล้ว กรุณาให้เจ้าของสร้าง QR ใหม่' }, 409);
+      }
+
+      const idToken = String(body.idToken || '').trim();
+      const lineLoginChannelId = String(env.LINE_LOGIN_CHANNEL_ID || '').trim();
+      if (!idToken) return jsonResponse({ ok: false, error: 'ไม่พบ LINE ID Token' }, 401);
+      if (!lineLoginChannelId) return jsonResponse({ ok: false, error: 'ยังไม่ได้ตั้งค่า LINE_LOGIN_CHANNEL_ID ใน Worker' }, 500);
+
+      let verifyResponse;
+      let verified = {};
+      try {
+        const verifyBody = new URLSearchParams();
+        verifyBody.set('id_token', idToken);
+        verifyBody.set('client_id', lineLoginChannelId);
+        verifyResponse = await fetch('https://api.line.me/oauth2/v2.1/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: verifyBody,
+        });
+        verified = await verifyResponse.json().catch(() => ({}));
+      } catch (err) {
+        await logEvent({ level: 'error', action: 'linePairVerifyToken', message: err?.message || String(err) });
+        return jsonResponse({ ok: false, error: 'ตรวจสอบ LINE ID Token ไม่สำเร็จ' }, 502);
+      }
+
+      if (!verifyResponse?.ok || !verified?.sub) {
+        return jsonResponse({ ok: false, error: verified?.error_description || verified?.error || 'LINE ID Token ไม่ถูกต้องหรือหมดอายุ' }, 401);
+      }
+
+      const lineUserId = String(verified.sub || '').trim();
+      const roomNum = String(parseInt(pair.record?.roomNum || 0, 10) || '').trim();
+      if (!roomNum || !isValidRoomNum(roomNum)) {
+        return jsonResponse({ ok: false, error: 'เลขห้องในลิงก์ไม่ถูกต้อง' }, 400);
+      }
+
+      const cfg = sanitizeConfig(await getKVJson('config', {}));
+      if (!cfg.userIds) cfg.userIds = {};
+      const currentMappedUserId = String(cfg.userIds?.[roomNum] || '').trim();
+
+      if (currentMappedUserId && currentMappedUserId !== lineUserId) {
+        await logEvent({
+          level: 'warn',
+          action: 'linePairBlockedExistingMapping',
+          message: 'QR pairing blocked because room already has LINE mapping',
+          roomNum,
+        });
+        return jsonResponse({
+          ok: false,
+          error: 'ห้องนี้มี LINE จับคู่อยู่แล้ว ระบบจึงไม่ทับให้อัตโนมัติ กรุณาติดต่อเจ้าของหอ',
+          alreadyLinked: true,
+        }, 409);
+      }
+
+      cfg.userIds[roomNum] = lineUserId;
+      await putKVJson('config', cfg);
+
+      const now = new Date();
+      const usedAt = now.toISOString();
+      const usedAtText = thTime(now);
+      const nextPairRecord = {
+        ...(pair.record || {}),
+        used: true,
+        usedAt,
+        usedAtText,
+        lineUserId,
+        displayName: tenantSafeText(verified.name || verified.displayName || '', 180),
+      };
+      await env.DB.put(linePairTokenKey(pair.token), JSON.stringify(nextPairRecord), { expirationTtl: 7 * 24 * 60 * 60 });
+
+      if (TOKEN && OWNER_ID) {
+        try {
+          const ownerMessage = [
+            '📱 จับคู่ LINE ผ่าน QR สำเร็จ',
+            '🏠 ห้อง ' + roomNum,
+            nextPairRecord.displayName ? '👤 ' + nextPairRecord.displayName : '',
+            '🔑 User ID: ' + lineUserId,
+          ].filter(Boolean).join('\n');
+          await pushLine(TOKEN, OWNER_ID, ownerMessage);
+        } catch (_) {}
+      }
+
+      await logEvent({
+        action: 'linePairComplete',
+        message: 'Tenant paired room via QR LIFF',
+        roomNum,
+        extra: { hasDisplayName: !!nextPairRecord.displayName },
+      });
+
+      return jsonResponse({
+        ok: true,
+        roomNum,
+        displayName: nextPairRecord.displayName || '',
+        alreadyLinked: !!currentMappedUserId,
+      });
     } else {
       // savePin อนุญาตเฉพาะกรณีตั้ง PIN ครั้งแรก ถ้ามี PIN แล้วต้องผ่าน admin token
       if (body.action === 'savePin') {
@@ -2683,6 +2837,54 @@ export default {
         remaining: lineMessageQuota.remaining,
       });
     }
+    if (body.action === 'createLinePairToken') {
+      const roomNum = String(parseInt(body.roomNum || body.room || 0, 10) || '').trim();
+      if (!roomNum || !isValidRoomNum(roomNum)) {
+        return jsonResponse({ ok: false, error: 'เลขห้องไม่ถูกต้อง' }, 400);
+      }
+
+      const cfg = sanitizeConfig(await getKVJson('config', {}));
+      const existingLineUserId = String(cfg.userIds?.[roomNum] || '').trim();
+      if (existingLineUserId && !body.allowExistingRoom) {
+        return jsonResponse({
+          ok: false,
+          error: 'ห้องนี้มี LINE User ID อยู่แล้ว กรุณาล้างการจับคู่เดิมก่อนสร้าง QR สำหรับผู้เช่าใหม่',
+          alreadyLinked: true,
+        }, 409);
+      }
+
+      const token = randomToken();
+      const now = new Date();
+      const expiresAtDate = new Date(now.getTime() + LINE_PAIR_TOKEN_TTL_MS);
+      const record = {
+        token,
+        roomNum,
+        used: false,
+        createdAt: now.toISOString(),
+        createdAtText: thTime(now),
+        expiresAt: expiresAtDate.toISOString(),
+        expiresAtText: thTime(expiresAtDate),
+      };
+
+      await env.DB.put(linePairTokenKey(token), JSON.stringify(record), {
+        expirationTtl: Math.ceil(LINE_PAIR_TOKEN_TTL_MS / 1000) + 300,
+      });
+
+      await logEvent({
+        action: 'createLinePairToken',
+        message: 'Created QR LIFF pairing token for room',
+        roomNum,
+      });
+
+      return jsonResponse({
+        ok: true,
+        roomNum,
+        token,
+        expiresAt: record.expiresAt,
+        expiresAtText: record.expiresAtText,
+      });
+    }
+
     if (body.action === 'getRepairRequests') {
       const rows = sanitizeRepairRequests(await getKVJson('repairRequests', []));
       const enriched = await Promise.all(rows.slice().reverse().map(async row => ({
