@@ -1,4 +1,4 @@
-// v15.4.2.78: QR LIFF new-tenant room pairing LIFF check fix + LINE OA quota APIs
+// v15.4.2.79: QR LIFF ID fix and auto-replace room pairing QR
 const DEFAULT_LINE_TEMPLATES = Object.freeze({
   rentNotice: `🏠 {shopName} — ห้อง {room}
 {tenantNameLine}📅 รอบบิล {billingMonth}
@@ -237,6 +237,7 @@ export default {
     // ===== QR / LIFF จับคู่ LINE ผู้เช่าใหม่ =====
     const LINE_PAIR_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
     const LINE_PAIR_TOKEN_PREFIX = 'linePairToken:';
+    const LINE_PAIR_ROOM_PREFIX = 'linePairRoom:';
 
     const normalizeLinePairToken = (token = '') => {
       const safe = String(token || '').trim().toLowerCase();
@@ -245,6 +246,11 @@ export default {
 
     const linePairTokenKey = (token = '') =>
       LINE_PAIR_TOKEN_PREFIX + normalizeLinePairToken(token);
+
+    const linePairRoomKey = (roomNum = '') => {
+      const safeRoom = String(parseInt(roomNum || 0, 10) || '').trim();
+      return LINE_PAIR_ROOM_PREFIX + safeRoom;
+    };
 
     const getLinePairTokenRecord = async (token = '') => {
       const safe = normalizeLinePairToken(token);
@@ -256,6 +262,7 @@ export default {
       if (!expiresMs || Date.now() > expiresMs) {
         return { token: safe, record, status: 'expired' };
       }
+      if (record.cancelled) return { token: safe, record, status: 'cancelled' };
       return { token: safe, record, status: record.used ? 'used' : 'active' };
     };
 
@@ -1309,7 +1316,7 @@ export default {
       const values = await Promise.all(keys.map(k => env.DB.get(k)));
       const backup = {
         app: 'pananth-rental',
-        version: 'v15.4.2.78',
+        version: 'v15.4.2.79',
         backupType,
         reason,
         backupId,
@@ -2667,6 +2674,9 @@ export default {
       if (pair.status === 'missing' || pair.status === 'expired') {
         return jsonResponse({ ok: false, error: 'ลิงก์จับคู่หมดอายุหรือไม่พบรายการนี้' }, 410);
       }
+      if (pair.status === 'cancelled') {
+        return jsonResponse({ ok: false, error: 'QR นี้ถูกแทนที่ด้วย QR ใหม่แล้ว กรุณาใช้ QR ล่าสุดจากเจ้าของหอ' }, 410);
+      }
 
       const roomNum = String(parseInt(pair.record?.roomNum || 0, 10) || '').trim();
       if (!roomNum || !isValidRoomNum(roomNum)) {
@@ -2691,6 +2701,9 @@ export default {
       }
       if (pair.status === 'missing' || pair.status === 'expired') {
         return jsonResponse({ ok: false, error: 'ลิงก์จับคู่หมดอายุหรือไม่พบรายการนี้' }, 410);
+      }
+      if (pair.status === 'cancelled') {
+        return jsonResponse({ ok: false, error: 'QR นี้ถูกแทนที่ด้วย QR ใหม่แล้ว กรุณาใช้ QR ล่าสุดจากเจ้าของหอ' }, 410);
       }
       if (pair.status === 'used') {
         return jsonResponse({ ok: false, error: 'QR นี้ถูกใช้จับคู่แล้ว กรุณาให้เจ้าของสร้าง QR ใหม่' }, 409);
@@ -2853,6 +2866,29 @@ export default {
         }, 409);
       }
 
+      const previousPairToken = normalizeLinePairToken(await env.DB.get(linePairRoomKey(roomNum)));
+      if (previousPairToken) {
+        const previousPair = await getLinePairTokenRecord(previousPairToken);
+        if (previousPair.record && previousPair.status === 'active') {
+          const cancelledAtDate = new Date();
+          const cancelledRecord = {
+            ...(previousPair.record || {}),
+            cancelled: true,
+            cancelledAt: cancelledAtDate.toISOString(),
+            cancelledAtText: thTime(cancelledAtDate),
+            cancelReason: 'replaced_by_new_qr',
+          };
+          await env.DB.put(linePairTokenKey(previousPairToken), JSON.stringify(cancelledRecord), {
+            expirationTtl: Math.ceil(LINE_PAIR_TOKEN_TTL_MS / 1000) + 300,
+          });
+          await logEvent({
+            action: 'replaceLinePairToken',
+            message: 'Cancelled previous active QR LIFF pairing token for room',
+            roomNum,
+          });
+        }
+      }
+
       const token = randomToken();
       const now = new Date();
       const expiresAtDate = new Date(now.getTime() + LINE_PAIR_TOKEN_TTL_MS);
@@ -2867,6 +2903,9 @@ export default {
       };
 
       await env.DB.put(linePairTokenKey(token), JSON.stringify(record), {
+        expirationTtl: Math.ceil(LINE_PAIR_TOKEN_TTL_MS / 1000) + 300,
+      });
+      await env.DB.put(linePairRoomKey(roomNum), token, {
         expirationTtl: Math.ceil(LINE_PAIR_TOKEN_TTL_MS / 1000) + 300,
       });
 
