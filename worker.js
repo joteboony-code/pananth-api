@@ -1,4 +1,4 @@
-// v15.4.2.83: PIN Worker fallback + QR LIFF ID fix and auto-replace room pairing QR
+// v15.4.2.84: ignore invalid stored PIN hash + PIN Worker fallback
 const DEFAULT_LINE_TEMPLATES = Object.freeze({
   rentNotice: `🏠 {shopName} — ห้อง {room}
 {tenantNameLine}📅 รอบบิล {billingMonth}
@@ -273,6 +273,12 @@ export default {
       let out = 0;
       for (let i = 0; i < x.length; i++) out |= x.charCodeAt(i) ^ y.charCodeAt(i);
       return out === 0;
+    };
+
+    const isValidPinHash = (value) => /^[a-f0-9]{64}$/i.test(String(value || '').trim());
+    const normalizeStoredPinHash = (value) => {
+      const pinHash = String(value || '').trim();
+      return isValidPinHash(pinHash) ? pinHash : '';
     };
 
     const hashPinOnWorker = async (pin = '') => {
@@ -1326,7 +1332,7 @@ export default {
       const values = await Promise.all(keys.map(k => env.DB.get(k)));
       const backup = {
         app: 'pananth-rental',
-        version: 'v15.4.2.83',
+        version: 'v15.4.2.84',
         backupType,
         reason,
         backupId,
@@ -1977,7 +1983,7 @@ export default {
         });
       }
 
-      const pin = await env.DB.get('pin');
+      const pin = normalizeStoredPinHash(await env.DB.get('pin'));
       const auth = await checkAdminAuth();
       if (!auth.ok) {
         return jsonResponse({
@@ -2170,7 +2176,7 @@ export default {
     } catch (_) { return textResponse('Bad Request', 400); }
 
     if (body.action === 'pinStatus') {
-      const storedPin = await env.DB.get('pin');
+      const storedPin = normalizeStoredPinHash(await env.DB.get('pin'));
       const lockState = await getPinLockState();
       return jsonResponse({
         ok: true,
@@ -2181,10 +2187,10 @@ export default {
     }
 
     if (body.action === 'verifyPin') {
-      const storedPin = await env.DB.get('pin');
+      const storedPin = normalizeStoredPinHash(await env.DB.get('pin'));
       const incomingHash = String(body.pinHash || body.data || '').trim();
       const rawPin = String(body.pin || '').trim();
-      const pinHash = /^[a-f0-9]{64}$/i.test(incomingHash)
+      const pinHash = isValidPinHash(incomingHash)
         ? incomingHash
         : await hashPinOnWorker(rawPin);
       const lockState = await getPinLockState();
@@ -2817,7 +2823,7 @@ export default {
     } else {
       // savePin อนุญาตเฉพาะกรณีตั้ง PIN ครั้งแรก ถ้ามี PIN แล้วต้องผ่าน admin token
       if (body.action === 'savePin') {
-        const currentPin = await env.DB.get('pin');
+        const currentPin = normalizeStoredPinHash(await env.DB.get('pin'));
         if (currentPin) {
           const denied = await requireAdminAuth('savePin');
           if (denied) return denied;
@@ -3245,11 +3251,11 @@ export default {
     if (body.action === 'savePin') {
       const incomingHash = String(body.data || body.pinHash || '').trim();
       const rawPin = String(body.pin || '').trim();
-      const pinHash = /^[a-f0-9]{64}$/i.test(incomingHash)
+      const pinHash = isValidPinHash(incomingHash)
         ? incomingHash
         : await hashPinOnWorker(rawPin);
 
-      if (pinHash && !/^[a-f0-9]{64}$/i.test(pinHash)) {
+      if (pinHash && !isValidPinHash(pinHash)) {
         return jsonResponse({ ok: false, error: 'Invalid PIN hash' }, 400);
       }
       if (!pinHash && rawPin) {
