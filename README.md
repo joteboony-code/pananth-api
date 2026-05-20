@@ -105,3 +105,12 @@ https://white-rice-cf72.joteboony.workers.dev/
 - เพิ่ม action `getLineMessageQuota` สำหรับหน้าเจ้าของ
 - เรียก LINE Messaging API `/v2/bot/message/quota` และ `/v2/bot/message/quota/consumption`
 - คืนค่า limit / totalUsage / remaining / usedPercent
+
+
+## v15.4.2.94 Meter OCR
+เพิ่ม Secrets ใน Cloudflare Worker ก่อนใช้ OCR:
+- `GOOGLE_VISION_CLIENT_EMAIL`
+- `GOOGLE_VISION_PRIVATE_KEY`
+- `GOOGLE_VISION_PROJECT_ID` (ไม่บังคับ)
+
+เปิดใช้ Cloud Vision API ใน Google Cloud project แล้วสร้าง Service Account key เพื่อนำ `client_email` และ `private_key` มาใส่เป็น Worker Secrets

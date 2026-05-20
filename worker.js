@@ -1,4 +1,4 @@
-// v15.4.2.92: Tenant Portal slip upload + EasySlip cross-channel duplicate guard
+// v15.4.2.94: Meter OCR via Google Cloud Vision + retain Portal slip upload / EasySlip duplicate guard
 const DEFAULT_LINE_TEMPLATES = Object.freeze({
   rentNotice: `🏠 {shopName} — ห้อง {room}
 {tenantNameLine}📅 รอบบิล {billingMonth}
@@ -122,6 +122,17 @@ export default {
       'image/png',
       'image/webp',
     ]);
+
+    // ===== METER OCR / GOOGLE CLOUD VISION =====
+    // ใช้ Service Account เก็บเป็น Cloudflare Worker Secrets:
+    // GOOGLE_VISION_CLIENT_EMAIL, GOOGLE_VISION_PRIVATE_KEY
+    // GOOGLE_VISION_PROJECT_ID เป็นตัวเลือกเพิ่มเติมสำหรับ quota project header
+    const GOOGLE_VISION_CLIENT_EMAIL = String(env.GOOGLE_VISION_CLIENT_EMAIL || '').trim();
+    const GOOGLE_VISION_PRIVATE_KEY = String(env.GOOGLE_VISION_PRIVATE_KEY || '').replace(/\\n/g, '\n').trim();
+    const GOOGLE_VISION_PROJECT_ID = String(env.GOOGLE_VISION_PROJECT_ID || '').trim();
+    const GOOGLE_VISION_SCOPE = 'https://www.googleapis.com/auth/cloud-platform';
+    const GOOGLE_VISION_TOKEN_URL = 'https://oauth2.googleapis.com/token';
+    const GOOGLE_VISION_ANNOTATE_URL = 'https://vision.googleapis.com/v1/images:annotate';
 
     // ===== REPAIR REQUEST / MAINTENANCE PHOTO STORAGE =====
     const REPAIR_PHOTO_PREFIX = 'repair-requests/';
@@ -619,6 +630,129 @@ export default {
       return bytes;
     };
 
+    const meterPhotoBase64Content = (raw = '') =>
+      String(raw || '').replace(/^data:[^,]+,/, '').replace(/\s+/g, '');
+
+    const bytesToBase64Url = (input) => {
+      const bytes = input instanceof Uint8Array ? input : new Uint8Array(input || []);
+      let binary = '';
+      const chunkSize = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunkSize) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+      }
+      return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+    };
+
+    const utf8ToBase64Url = (text = '') =>
+      bytesToBase64Url(new TextEncoder().encode(String(text || '')));
+
+    const pemPrivateKeyToPkcs8 = (pem = '') => {
+      const cleaned = String(pem || '')
+        .replace(/-----BEGIN PRIVATE KEY-----/g, '')
+        .replace(/-----END PRIVATE KEY-----/g, '')
+        .replace(/\s+/g, '');
+      if (!cleaned) throw new Error('GOOGLE_VISION_PRIVATE_KEY ไม่ถูกต้อง');
+      const binary = atob(cleaned);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return bytes.buffer;
+    };
+
+    const createGoogleVisionJwt = async () => {
+      if (!GOOGLE_VISION_CLIENT_EMAIL || !GOOGLE_VISION_PRIVATE_KEY) {
+        throw new Error('ยังไม่ได้ตั้งค่า GOOGLE_VISION_CLIENT_EMAIL / GOOGLE_VISION_PRIVATE_KEY');
+      }
+      const nowSec = Math.floor(Date.now() / 1000);
+      const header = { alg: 'RS256', typ: 'JWT' };
+      const payload = {
+        iss: GOOGLE_VISION_CLIENT_EMAIL,
+        scope: GOOGLE_VISION_SCOPE,
+        aud: GOOGLE_VISION_TOKEN_URL,
+        exp: nowSec + 3600,
+        iat: nowSec,
+      };
+      const unsigned = utf8ToBase64Url(JSON.stringify(header)) + '.' + utf8ToBase64Url(JSON.stringify(payload));
+      const privateKey = await crypto.subtle.importKey(
+        'pkcs8',
+        pemPrivateKeyToPkcs8(GOOGLE_VISION_PRIVATE_KEY),
+        { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+        false,
+        ['sign']
+      );
+      const signature = await crypto.subtle.sign(
+        'RSASSA-PKCS1-v1_5',
+        privateKey,
+        new TextEncoder().encode(unsigned)
+      );
+      return unsigned + '.' + bytesToBase64Url(new Uint8Array(signature));
+    };
+
+    const getGoogleVisionAccessToken = async () => {
+      const assertion = await createGoogleVisionJwt();
+      const body = new URLSearchParams({
+        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+        assertion,
+      }).toString();
+      const res = await fetch(GOOGLE_VISION_TOKEN_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.access_token) {
+        throw new Error(data.error_description || data.error || 'ขอ Access Token สำหรับ Vision API ไม่สำเร็จ');
+      }
+      return String(data.access_token || '');
+    };
+
+    const extractMeterOcrCandidates = (ocrText = '', previousReading = 0) => {
+      const text = String(ocrText || '');
+      const prev = tenantSafeNumber(previousReading || 0, 0);
+      const rawMatches = [
+        ...(text.match(/[0-9][0-9\s.,:\/-]{1,18}[0-9]/g) || []),
+        ...(text.match(/[0-9]{3,8}/g) || []),
+      ];
+      const seen = new Set();
+      const rows = [];
+      rawMatches.forEach((raw, idx) => {
+        const digits = String(raw || '').replace(/\D/g, '');
+        if (digits.length < 3 || digits.length > 8) return;
+        const value = Number(digits);
+        if (!Number.isFinite(value)) return;
+        const key = String(value);
+        if (seen.has(key)) return;
+        seen.add(key);
+        let score = 0;
+        if (digits.length >= 4 && digits.length <= 7) score += 4;
+        if (digits.length === 5 || digits.length === 6) score += 2;
+        if (prev > 0) {
+          if (value >= prev) {
+            score += 8;
+            const diff = value - prev;
+            if (diff <= 5000) score += 4;
+            else if (diff <= 20000) score += 2;
+          } else {
+            score -= 8;
+          }
+        }
+        rows.push({
+          value,
+          digits,
+          raw: tenantSafeText(raw, 40),
+          score,
+          position: idx,
+          diff: prev > 0 ? Math.abs(value - prev) : 999999999,
+        });
+      });
+      rows.sort((a, b) =>
+        (b.score - a.score) ||
+        (a.diff - b.diff) ||
+        (b.digits.length - a.digits.length) ||
+        (a.position - b.position)
+      );
+      return rows.slice(0, 8);
+    };
+
     const assertSafeTenantDocumentKey = (key = '') => {
       const safeKey = tenantSafeText(key || '', 420);
       return safeKey.startsWith(TENANT_DOCUMENT_PREFIX) && !safeKey.includes('..')
@@ -800,6 +934,11 @@ export default {
             paymentMonthText: tenantSafeText(photo.paymentMonthText || '', 120),
             prevReading: tenantSafeNumber(photo.prevReading || 0, 0),
             currReading: tenantSafeNumber(photo.currReading || 0, 0),
+            ocrReading: tenantSafeNumber(photo.ocrReading || 0, 0),
+            ocrCandidates: Array.isArray(photo.ocrCandidates)
+              ? photo.ocrCandidates.map(value => tenantSafeNumber(value || 0, 0)).filter(value => value > 0).slice(0, 8)
+              : [],
+            ocrDetectedAt: tenantSafeText(photo.ocrDetectedAt || '', 80),
             uploadedAt: tenantSafeText(photo.uploadedAt || '', 80),
             uploadedAtText: tenantSafeText(photo.uploadedAtText || '', 120),
           };
@@ -3848,6 +3987,101 @@ export default {
       return jsonResponse({ ok: true, tenantProfiles: profiles, profile: profiles[roomNum], document: nextDocument });
     }
 
+    if (body.action === 'ocrMeterPhoto') {
+      const meterType = ['electric','water'].includes(String(body.meterType || '').trim())
+        ? String(body.meterType || '').trim()
+        : '';
+      if (!meterType) {
+        return jsonResponse({ ok: false, error: 'ระบุประเภทมิเตอร์เป็น electric หรือ water' }, 400);
+      }
+
+      const mimeType = tenantSafeText(body.mimeType || '', 80).toLowerCase();
+      if (!METER_PHOTO_ALLOWED_MIME.has(mimeType)) {
+        return jsonResponse({ ok: false, error: 'รองรับ OCR เฉพาะ JPG, PNG และ WEBP' }, 400);
+      }
+
+      const base64Content = meterPhotoBase64Content(body.base64 || body.data || '');
+      let bytes;
+      try {
+        bytes = decodeBase64Bytes(base64Content);
+      } catch (_) {
+        return jsonResponse({ ok: false, error: 'อ่านรูปสำหรับ OCR ไม่สำเร็จ' }, 400);
+      }
+      if (!bytes || !bytes.byteLength) return jsonResponse({ ok: false, error: 'รูปว่างหรืออ่านไม่ได้' }, 400);
+      if (bytes.byteLength > MAX_METER_PHOTO_BYTES) {
+        return jsonResponse({ ok: false, error: 'รูป OCR ใหญ่เกิน 4 MB' }, 413);
+      }
+
+      const previousReading = tenantSafeNumber(body.prevReading || body.previous || 0, 0);
+      let accessToken = '';
+      try {
+        accessToken = await getGoogleVisionAccessToken();
+      } catch (err) {
+        await logEvent({
+          level: 'warn',
+          action: 'ocrMeterPhotoAuthFailed',
+          message: 'Vision API authentication failed',
+          extra: { error: String(err?.message || err || '') },
+        });
+        return jsonResponse({ ok: false, error: err?.message || 'ยืนยันตัวตน Vision API ไม่สำเร็จ' }, 500);
+      }
+
+      let visionRes;
+      let visionData = {};
+      try {
+        const visionHeaders = {
+          'Authorization': 'Bearer ' + accessToken,
+          'Content-Type': 'application/json; charset=utf-8',
+        };
+        if (GOOGLE_VISION_PROJECT_ID) visionHeaders['x-goog-user-project'] = GOOGLE_VISION_PROJECT_ID;
+        visionRes = await fetch(GOOGLE_VISION_ANNOTATE_URL, {
+          method: 'POST',
+          headers: visionHeaders,
+          body: JSON.stringify({
+            requests: [{
+              image: { content: base64Content },
+              features: [{ type: 'TEXT_DETECTION' }],
+            }],
+          }),
+        });
+        visionData = await visionRes.json().catch(() => ({}));
+      } catch (err) {
+        await logEvent({
+          level: 'warn',
+          action: 'ocrMeterPhotoRequestFailed',
+          message: 'Vision API request failed',
+          extra: { error: String(err?.message || err || '') },
+        });
+        return jsonResponse({ ok: false, error: 'เรียก Vision API ไม่สำเร็จ' }, 502);
+      }
+
+      if (!visionRes || !visionRes.ok) {
+        const errText = visionData?.error?.message || visionData?.error_description || visionData?.error || 'Vision API ตอบกลับไม่สำเร็จ';
+        return jsonResponse({ ok: false, error: errText }, 502);
+      }
+
+      const response = Array.isArray(visionData?.responses) ? (visionData.responses[0] || {}) : {};
+      if (response?.error?.message) {
+        return jsonResponse({ ok: false, error: response.error.message }, 502);
+      }
+      const ocrText = String(response?.fullTextAnnotation?.text || response?.textAnnotations?.[0]?.description || '').trim();
+      const candidates = extractMeterOcrCandidates(ocrText, previousReading);
+      const best = candidates[0] || null;
+      await logEvent({
+        action: 'ocrMeterPhoto',
+        message: best ? 'Meter OCR detected reading candidate' : 'Meter OCR found no usable reading',
+        extra: { meterType, previousReading, reading: best?.value || 0, candidateCount: candidates.length },
+      });
+      return jsonResponse({
+        ok: true,
+        meterType,
+        previousReading,
+        reading: best ? best.value : null,
+        candidates: candidates.map(row => ({ value: row.value, digits: row.digits, raw: row.raw })),
+        rawTextPreview: tenantSafeText(ocrText, 700),
+      });
+    }
+
     if (body.action === 'uploadMeterPhoto') {
       if (!env.RENTAL_R2 || typeof env.RENTAL_R2.put !== 'function') {
         return jsonResponse({ ok: false, error: 'ยังไม่ได้ผูก R2 Bucket Binding ชื่อ RENTAL_R2 กับ Worker' }, 500);
@@ -3892,6 +4126,13 @@ export default {
 
       const prevReading = tenantSafeNumber(body.prevReading || body.previous || 0, 0);
       const currReading = tenantSafeNumber(body.currReading || body.current || 0, 0);
+      const ocrReading = tenantSafeNumber(body.ocrReading || 0, 0);
+      const ocrCandidates = String(body.ocrCandidates || '')
+        .split(',')
+        .map(value => tenantSafeNumber(value || 0, 0))
+        .filter(value => value > 0)
+        .slice(0, 8);
+      const ocrDetectedAt = tenantSafeText(body.ocrDetectedAt || '', 80);
 
       await env.RENTAL_R2.put(objectKey, bytes, {
         httpMetadata: { contentType: mimeType },
@@ -3906,6 +4147,9 @@ export default {
           paymentMonthText: billingMeta.paymentMonthText || '',
           prevReading: String(prevReading),
           currReading: String(currReading),
+          ocrReading: String(ocrReading || ''),
+          ocrCandidates: ocrCandidates.join(','),
+          ocrDetectedAt,
           originalName,
           uploadedAt,
           mimeType,
@@ -3929,6 +4173,9 @@ export default {
         paymentMonthText: billingMeta.paymentMonthText || '',
         prevReading,
         currReading,
+        ocrReading,
+        ocrCandidates,
+        ocrDetectedAt,
         uploadedAt,
         uploadedAtText,
       };
@@ -3939,7 +4186,7 @@ export default {
         action: 'uploadMeterPhoto',
         message: 'Meter photo uploaded',
         roomNum,
-        extra: { meterType, objectKey, size: bytes.byteLength, prevReading, currReading },
+        extra: { meterType, objectKey, size: bytes.byteLength, prevReading, currReading, ocrReading },
       });
 
       return jsonResponse({ ok: true, meterPhotos: store, photo });
@@ -6053,7 +6300,9 @@ async function runAutoRentReminder(env) {
       date: getDateText(),
       detailLines,
       totalDue: totalDue.toLocaleString('th-TH'),
-      bank: 'โอนเข้า บัญชี ttb 919-7-253892\nนายบุญรัตน์ ชลา\nส่งสลิปที่ไลน์นี้นะครับ',
+      bank: Number(i) <= 20
+        ? 'โอนเข้า บัญชี ttb 919-7-253892\nนายบุญรัตน์ ชลา\nส่งสลิปที่ไลน์นี้นะครับ'
+        : 'โอนเข้า บัญชี กรุงศรีอยุธยา 800-4-557541\nบุญรัตน์ ชลา\nส่งสลิปที่ไลน์นี้นะครับ',
       portalUrl: TENANT_PORTAL_URL,
     }, lineTemplates);
 
