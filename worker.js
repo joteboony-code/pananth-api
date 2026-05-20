@@ -1233,11 +1233,30 @@ export default {
       },
     });
 
+    const cleanTenantPortalLinkFromText = (text = '') => {
+      let base = String(text || '');
+      if (!TENANT_PORTAL_URL) return base.trim();
+      const escapedUrl = String(TENANT_PORTAL_URL).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const portalBlockPattern = new RegExp(
+        '(?:\\n|^)\\s*🏠\\s*ดูข้อมูลค่าเช่าและสถานะล่าสุดใน Tenant Portal:\\s*\\n\\s*' + escapedUrl + '\\s*(?=\\n|$)',
+        'gi'
+      );
+      const standalonePortalUrlPattern = new RegExp('(?:\\n|^)\\s*' + escapedUrl + '\\s*(?=\\n|$)', 'g');
+      base = base
+        .replace(portalBlockPattern, '\n')
+        .replace(standalonePortalUrlPattern, '\n')
+        .replace(new RegExp(escapedUrl, 'g'), '');
+      return base.replace(/\n{3,}/g, '\n\n').trim();
+    };
+
     const pushLine = async (token, to, text) => {
       if (!token || !to || !text) return { ok: false, error: 'Missing token/to/text' };
 
-      const messages = [{ type: 'text', text: String(text || '') }];
-      if (TENANT_PORTAL_URL && to && to !== OWNER_ID && !String(text || '').includes(TENANT_PORTAL_URL)) {
+      const cleanedText = cleanTenantPortalLinkFromText(text);
+      if (!cleanedText) return { ok: false, error: 'Message text became empty after portal link cleanup' };
+
+      const messages = [{ type: 'text', text: cleanedText }];
+      if (TENANT_PORTAL_URL && to && to !== OWNER_ID) {
         messages.push(makeTenantPortalFlexButton(TENANT_PORTAL_URL));
       }
 
@@ -5095,11 +5114,30 @@ async function runAutoRentReminder(env) {
     },
   });
 
+  const cleanTenantPortalLinkFromText = (text = '') => {
+    let base = String(text || '');
+    if (!TENANT_PORTAL_URL) return base.trim();
+    const escapedUrl = String(TENANT_PORTAL_URL).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const portalBlockPattern = new RegExp(
+      '(?:\\n|^)\\s*🏠\\s*ดูข้อมูลค่าเช่าและสถานะล่าสุดใน Tenant Portal:\\s*\\n\\s*' + escapedUrl + '\\s*(?=\\n|$)',
+      'gi'
+    );
+    const standalonePortalUrlPattern = new RegExp('(?:\\n|^)\\s*' + escapedUrl + '\\s*(?=\\n|$)', 'g');
+    base = base
+      .replace(portalBlockPattern, '\n')
+      .replace(standalonePortalUrlPattern, '\n')
+      .replace(new RegExp(escapedUrl, 'g'), '');
+    return base.replace(/\n{3,}/g, '\n\n').trim();
+  };
+
   const pushLine = async (to, text) => {
     if (!TOKEN || !to || !text) return { ok: false, error: 'Missing token/to/text' };
 
-    const messages = [{ type: 'text', text: String(text || '') }];
-    if (TENANT_PORTAL_URL && to && to !== OWNER_ID && !String(text || '').includes(TENANT_PORTAL_URL)) {
+    const cleanedText = cleanTenantPortalLinkFromText(text);
+    if (!cleanedText) return { ok: false, error: 'Message text became empty after portal link cleanup' };
+
+    const messages = [{ type: 'text', text: cleanedText }];
+    if (TENANT_PORTAL_URL && to && to !== OWNER_ID) {
       messages.push(makeTenantPortalFlexButton(TENANT_PORTAL_URL));
     }
 
