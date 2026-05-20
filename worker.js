@@ -1,4 +1,4 @@
-// v15.4.2.84: ignore invalid stored PIN hash + PIN Worker fallback
+// v15.4.2.92: Tenant Portal slip upload + EasySlip cross-channel duplicate guard
 const DEFAULT_LINE_TEMPLATES = Object.freeze({
   rentNotice: `🏠 {shopName} — ห้อง {room}
 {tenantNameLine}📅 รอบบิล {billingMonth}
@@ -132,6 +132,15 @@ export default {
       'image/webp',
     ]);
     const REPAIR_REQUEST_STATUSES = new Set(['open', 'in_progress', 'done', 'closed']);
+
+    // ===== TENANT PORTAL SLIP UPLOAD =====
+    // ผู้เช่าส่งสลิปจาก Tenant Portal ได้อีกช่องทาง โดยใช้ EasySlip + slipRefs ชุดเดียวกับหน้าแชต
+    const PORTAL_SLIP_ALLOWED_MIME = new Set([
+      'image/jpeg',
+      'image/png',
+      'image/webp',
+    ]);
+    const MAX_PORTAL_SLIP_BYTES = 6 * 1024 * 1024;
 
     // ===== TEST ROOM 99 =====
     const TEST_ROOM_NUM = 99;
@@ -2838,6 +2847,438 @@ export default {
         totals,
         rooms: portalRooms,
       });
+    } else if (body.action === 'submitPortalSlip') {
+      const idToken = String(body.idToken || '').trim();
+      const lineLoginChannelId = String(env.LINE_LOGIN_CHANNEL_ID || '').trim();
+      if (!idToken) return jsonResponse({ ok: false, error: 'ไม่พบ LINE ID Token' }, 401);
+      if (!lineLoginChannelId) return jsonResponse({ ok: false, error: 'ยังไม่ได้ตั้งค่า LINE_LOGIN_CHANNEL_ID ใน Worker' }, 500);
+
+      let verifyResponse;
+      let verified = {};
+      try {
+        const verifyBody = new URLSearchParams();
+        verifyBody.set('id_token', idToken);
+        verifyBody.set('client_id', lineLoginChannelId);
+        verifyResponse = await fetch('https://api.line.me/oauth2/v2.1/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: verifyBody,
+        });
+        verified = await verifyResponse.json().catch(() => ({}));
+      } catch (err) {
+        await logEvent({ level: 'error', action: 'portalSlipVerifyToken', message: err?.message || String(err) });
+        return jsonResponse({ ok: false, error: 'ตรวจสอบ LINE ID Token ไม่สำเร็จ' }, 502);
+      }
+      if (!verifyResponse?.ok || !verified?.sub) {
+        return jsonResponse({ ok: false, error: verified?.error_description || verified?.error || 'LINE ID Token ไม่ถูกต้องหรือหมดอายุ' }, 401);
+      }
+
+      const lineUserId = String(verified.sub || '').trim();
+      const requestedRoomNum = String(parseInt(body.roomNum || 0, 10) || '').trim();
+      if (!requestedRoomNum || !isValidRoomNum(requestedRoomNum) || isTestRoom(requestedRoomNum)) {
+        return jsonResponse({ ok: false, error: 'เลขห้องสำหรับแนบสลิปไม่ถูกต้อง' }, 400);
+      }
+
+      const slipInput = body.slip && typeof body.slip === 'object' ? body.slip : {};
+      const mimeType = tenantSafeText(slipInput.mimeType || slipInput.contentType || '', 80).toLowerCase();
+      if (!PORTAL_SLIP_ALLOWED_MIME.has(mimeType)) {
+        return jsonResponse({ ok: false, error: 'รองรับสลิปเฉพาะไฟล์ JPG, PNG หรือ WEBP' }, 400);
+      }
+      let slipBytes;
+      try {
+        slipBytes = decodeBase64Bytes(slipInput.base64 || slipInput.data || '');
+      } catch (_) {
+        return jsonResponse({ ok: false, error: 'อ่านไฟล์สลิปไม่สำเร็จ' }, 400);
+      }
+      if (!slipBytes || !slipBytes.byteLength) {
+        return jsonResponse({ ok: false, error: 'ไม่พบข้อมูลรูปสลิป' }, 400);
+      }
+      if (slipBytes.byteLength > MAX_PORTAL_SLIP_BYTES) {
+        return jsonResponse({ ok: false, error: 'ไฟล์สลิปใหญ่เกิน 6 MB กรุณาเลือกรูปที่เล็กลง' }, 413);
+      }
+      const slipBase64 = tenantSafeText(slipInput.base64 || slipInput.data || '', 12_500_000);
+      if (!slipBase64) return jsonResponse({ ok: false, error: 'ไม่พบข้อมูลรูปสลิป' }, 400);
+
+      const [configData, tenantsData, roomsData, paymentData, slipRefsData, arrearsData, monthClosuresData, lastCloseBackupData, lineTemplatesData] = await Promise.all([
+        env.DB.get('config'),
+        env.DB.get('tenants'),
+        env.DB.get('rooms'),
+        env.DB.get('paymentHistory'),
+        env.DB.get('slipRefs'),
+        env.DB.get('arrears'),
+        env.DB.get('monthClosures'),
+        env.DB.get('lastCloseBackup'),
+        env.DB.get('lineTemplates'),
+      ]);
+
+      const normalizedCycle = normalizeBillingCycleConfig(
+        safeJsonParse(configData, {}),
+        safeJsonParse(monthClosuresData, {}),
+        safeJsonParse(lastCloseBackupData, null)
+      );
+      const cfg = normalizedCycle.config;
+      const billingMeta = normalizedCycle.billingMeta;
+      if (normalizedCycle.changed) {
+        ctx.waitUntil(putKVJson('config', normalizedCycle.config));
+        ctx.waitUntil(logEvent({ action: 'autoSyncBillingCycle', message: 'Billing cycle config auto-synced before Tenant Portal slip payment', extra: { source: normalizedCycle.source, billingMeta } }));
+      }
+
+      const tenants = safeJsonParse(tenantsData, {});
+      const rooms = safeJsonParse(roomsData, {});
+      const paymentHistory = safeJsonParse(paymentData, []);
+      const slipRefs = safeJsonParse(slipRefsData, {});
+      const arrears = safeJsonParse(arrearsData, {});
+      const lineTemplates = sanitizeLineTemplates(safeJsonParse(lineTemplatesData, {}));
+      const matchedRoomNums = Object.entries(cfg.userIds || {})
+        .filter(([, userId]) => String(userId || '').trim() === lineUserId)
+        .map(([roomNum]) => String(parseInt(roomNum || 0, 10) || '').trim())
+        .filter(roomNum => roomNum && isValidRoomNum(roomNum) && !isTestRoom(roomNum));
+      if (!matchedRoomNums.includes(requestedRoomNum)) {
+        return jsonResponse({ ok: false, error: 'ห้องนี้ไม่ได้ผูกกับบัญชี LINE ของคุณ' }, 403);
+      }
+
+      const tenantName = String(tenants?.[requestedRoomNum]?.name || verified.name || '').trim();
+      const roomInfo = 'ห้อง ' + requestedRoomNum + (tenantName ? ' (' + tenantName + ')' : '');
+      let slipData = null;
+      let slipCheckError = '';
+      try {
+        slipData = await verifySlipWithEasySlip(slipBase64);
+      } catch (err) {
+        slipCheckError = err?.message || String(err || 'ตรวจสลิปไม่ได้');
+      }
+
+      if (!slipData) {
+        await setPendingSlipReview([requestedRoomNum], {
+          reason: 'portal-slip-verify-failed',
+          note: slipCheckError || 'ตรวจสลิปจาก Portal ไม่ได้',
+          lineUserId,
+        });
+        if (TOKEN && OWNER_ID) {
+          try {
+            await pushLine(
+              TOKEN,
+              OWNER_ID,
+              '🧾 มีสลิปแนบจาก Tenant Portal' +
+                '\n🏠 ' + roomInfo +
+                '\n\n⚠️ ตรวจอัตโนมัติไม่ได้ กรุณาตรวจสอบด้วยตนเองครับ' +
+                (slipCheckError ? '\n\nสาเหตุ: ' + slipCheckError : '')
+            );
+          } catch (_) {}
+        }
+        if (TOKEN && lineUserId) {
+          try {
+            await pushLine(
+              TOKEN,
+              lineUserId,
+              '🧾 ระบบได้รับสลิปจาก Tenant Portal แล้วครับ' +
+                '\nแต่ยังตรวจสอบอัตโนมัติไม่ได้ เจ้าของหอจะตรวจสอบต่อให้ครับ'
+            );
+          } catch (_) {}
+        }
+        await logEvent({
+          level: 'error',
+          action: 'portalSlipVerifyFailed',
+          message: slipCheckError || 'EasySlip no data from Tenant Portal',
+          roomNum: requestedRoomNum,
+          extra: { lineUserId },
+        });
+        return jsonResponse({
+          ok: true,
+          status: 'review',
+          roomNum: requestedRoomNum,
+          message: 'รับไฟล์สลิปแล้ว แต่ระบบตรวจอัตโนมัติไม่ได้ เจ้าของหอจะตรวจสอบต่อให้ครับ',
+        });
+      }
+
+      const slipAmount = Number(slipData.amount ?? 0);
+      const sender = slipData.sender?.account?.name ?? '?';
+      const receiver = slipData.receiver?.account?.name ?? '?';
+      const ref = slipData.transRef ?? '-';
+      const refKey = makeSlipKey(slipData);
+      const dt = slipData.dateTime
+        ? new Date(slipData.dateTime).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' })
+        : '?';
+
+      if (slipData.isDuplicate) {
+        if (TOKEN && lineUserId) {
+          try {
+            await pushLine(
+              TOKEN,
+              lineUserId,
+              '⚠️ สลิปที่แนบจาก Tenant Portal เคยถูกตรวจแล้วครับ' +
+                '\n💰 ยอด: ' + slipAmount.toLocaleString('th-TH') + ' ฿' +
+                '\n🔢 Ref: ' + ref +
+                '\n\nกรุณาติดต่อเจ้าของหอเพื่อตรวจสอบครับ'
+            );
+          } catch (_) {}
+        }
+        if (TOKEN && OWNER_ID) {
+          try {
+            await pushLine(
+              TOKEN,
+              OWNER_ID,
+              '⚠️ EasySlip แจ้งว่าสลิปจาก Tenant Portal ซ้ำครับ' +
+                '\n🏠 ' + roomInfo +
+                '\n💰 ยอด: ' + slipAmount.toLocaleString('th-TH') + ' ฿' +
+                '\n🔢 Ref: ' + ref +
+                '\n📅 ' + dt +
+                '\n\nระบบไม่ได้อัปเดตสถานะครับ'
+            );
+          } catch (_) {}
+        }
+        await logEvent({
+          level: 'info',
+          action: 'portalEasySlipDuplicate',
+          message: 'EasySlip duplicate portal slip ignored',
+          roomNum: requestedRoomNum,
+          ref,
+          extra: { lineUserId, slipAmount },
+        });
+        return jsonResponse({
+          ok: true,
+          status: 'duplicate',
+          roomNum: requestedRoomNum,
+          amount: slipAmount,
+          ref,
+          message: 'สลิปนี้เคยถูกตรวจแล้ว ระบบไม่ได้ตัดยอดซ้ำครับ',
+        });
+      }
+
+      if (slipRefs[refKey]) {
+        const used = slipRefs[refKey] || {};
+        if (TOKEN && lineUserId) {
+          try {
+            await pushLine(
+              TOKEN,
+              lineUserId,
+              '⚠️ สลิปที่แนบจาก Tenant Portal เคยถูกใช้แล้วครับ' +
+                '\n🏠 ใช้กับห้อง: ' + (used.roomNum || '-') +
+                '\n💰 ยอด: ' + (Number(used.amount) || 0).toLocaleString('th-TH') + ' ฿' +
+                '\n📅 เวลาที่บันทึก: ' + (used.usedAtText || used.usedAt || '-') +
+                '\n\nกรุณาติดต่อเจ้าของหอเพื่อตรวจสอบครับ'
+            );
+          } catch (_) {}
+        }
+        if (TOKEN && OWNER_ID) {
+          try {
+            await pushLine(
+              TOKEN,
+              OWNER_ID,
+              '⚠️ พบสลิปจาก Tenant Portal ซ้ำครับ' +
+                '\n🏠 ผู้ส่งปัจจุบัน: ' + roomInfo +
+                '\n💰 ยอด: ' + slipAmount.toLocaleString('th-TH') + ' ฿' +
+                '\n🔢 Ref: ' + ref +
+                '\n\nสลิปนี้เคยถูกใช้แล้ว' +
+                '\n🏠 ใช้กับห้อง: ' + (used.roomNum || '-') +
+                '\n💰 ยอดเดิม: ' + (Number(used.amount) || 0).toLocaleString('th-TH') + ' ฿' +
+                '\n📅 เวลาที่บันทึก: ' + (used.usedAtText || used.usedAt || '-') +
+                '\n\nระบบไม่ได้อัปเดตสถานะซ้ำครับ'
+            );
+          } catch (_) {}
+        }
+        await logEvent({ level: 'info', action: 'portalDuplicateSlip', message: 'Duplicate portal slip ignored', roomNum: requestedRoomNum, ref });
+        return jsonResponse({
+          ok: true,
+          status: 'duplicate',
+          roomNum: requestedRoomNum,
+          amount: slipAmount,
+          ref,
+          message: 'สลิปนี้เคยถูกใช้แล้ว ระบบไม่ได้ตัดยอดซ้ำครับ',
+        });
+      }
+
+      const room = rooms[requestedRoomNum] || rooms[Number(requestedRoomNum)] || null;
+      if (!room) {
+        await setPendingSlipReview([requestedRoomNum], {
+          reason: 'portal-slip-room-missing',
+          note: 'ไม่พบข้อมูลห้องใน rooms ตอนตรวจสลิป Portal',
+          lineUserId,
+          amount: slipAmount,
+          ref,
+        });
+        await logEvent({ level: 'error', action: 'portalSlipRoomMissing', message: 'Room not found for portal slip', roomNum: requestedRoomNum, ref });
+        return jsonResponse({ ok: true, status: 'review', roomNum: requestedRoomNum, message: 'รับสลิปแล้ว แต่ระบบไม่พบข้อมูลห้อง เจ้าของหอจะตรวจสอบต่อให้ครับ' });
+      }
+
+      const currentExpected = room.paid || room.vacant
+        ? 0
+        : Math.max(0, calcExpectedAmount(requestedRoomNum, room, cfg) - Number(room.manualPaidAmount || 0));
+      const oldDebt = getRoomArrearsTotal(arrears, requestedRoomNum);
+      const totalDue = oldDebt + currentExpected;
+      if (!(slipAmount > 0) || totalDue <= 0) {
+        await setPendingSlipReview([requestedRoomNum], {
+          reason: totalDue <= 0 ? 'portal-slip-no-outstanding' : 'portal-slip-zero-amount',
+          note: totalDue <= 0 ? 'ห้องนี้ไม่มียอดค้างในเวลาที่แนบสลิป' : 'ยอดสลิปเป็น 0 หรืออ่านยอดไม่ได้',
+          lineUserId,
+          amount: slipAmount,
+          ref,
+        });
+        if (TOKEN && OWNER_ID) {
+          try {
+            await pushLine(
+              TOKEN,
+              OWNER_ID,
+              '⚠️ สลิปจาก Tenant Portal ต้องตรวจสอบเอง' +
+                '\n🏠 ' + roomInfo +
+                '\n💰 ยอดสลิป: ' + slipAmount.toLocaleString('th-TH') + ' ฿' +
+                '\n💳 ยอดค้างในระบบ: ' + totalDue.toLocaleString('th-TH') + ' ฿' +
+                '\n🔢 Ref: ' + ref +
+                '\n\nระบบยังไม่อัปเดตสถานะห้องครับ'
+            );
+          } catch (_) {}
+        }
+        await logEvent({ level: 'warn', action: 'portalSlipNeedsReview', message: totalDue <= 0 ? 'Portal slip for room with no outstanding amount' : 'Portal slip amount <= 0', roomNum: requestedRoomNum, ref, extra: { slipAmount, totalDue } });
+        return jsonResponse({ ok: true, status: 'review', roomNum: requestedRoomNum, amount: slipAmount, ref, message: 'รับสลิปแล้ว แต่ระบบต้องให้เจ้าของตรวจสอบก่อนครับ' });
+      }
+
+      await autoBackupBeforeImportantAction('before_portal_slip_payment_room_' + requestedRoomNum, billingMeta || {});
+      const applyResult = applyPaymentToRoom({
+        roomNum: requestedRoomNum,
+        amount: slipAmount,
+        rooms,
+        arrears,
+        note: 'ชำระผ่าน Tenant Portal + EasySlip',
+        source: 'EasySlip Portal',
+        ref,
+        sender,
+        receiver,
+        billingMeta,
+        config: cfg,
+      });
+
+      slipRefs[refKey] = {
+        ref,
+        roomNum: requestedRoomNum,
+        userId: lineUserId,
+        amount: slipAmount,
+        sender,
+        receiver,
+        slipDateTime: slipData.dateTime || '',
+        usedAt: new Date().toISOString(),
+        usedAtText: thTime(),
+        source: 'Tenant Portal',
+      };
+
+      const status = applyResult.remainingTotal <= 0 ? 'verified' : 'partial';
+      paymentHistory.push({
+        id: refKey,
+        ref,
+        roomNum: requestedRoomNum,
+        userId: lineUserId,
+        amount: slipAmount,
+        expectedAmount: totalDue,
+        appliedTotal: applyResult.appliedTotal,
+        remainingTotal: applyResult.remainingTotal,
+        appliedItems: applyResult.appliedItems,
+        sender,
+        receiver,
+        month: billingMeta.billingMonthText,
+        slipDateTime: slipData.dateTime || '',
+        paidAt: new Date().toISOString(),
+        paidAtText: thTime(),
+        status,
+        source: 'EasySlip Portal',
+      });
+      while (paymentHistory.length > 1000) paymentHistory.shift();
+      if (applyResult.remainingTotal <= 0 && cfg?.reminderMuteRooms) {
+        delete cfg.reminderMuteRooms[requestedRoomNum];
+        delete cfg.reminderMuteRooms[String(requestedRoomNum)];
+      }
+      await Promise.all([
+        putKVJson('rooms', rooms),
+        putKVJson('arrears', arrears),
+        putKVJson('slipRefs', slipRefs),
+        putKVJson('paymentHistory', paymentHistory),
+        putKVJson('config', sanitizeConfig(cfg || {})),
+      ]);
+      await clearPendingSlipReview(requestedRoomNum);
+
+      if (status === 'verified') {
+        const tenantPaymentMessage = renderLineTemplate('paymentConfirmation', {
+          paymentTitle: 'ตรวจสอบสลิปจาก Tenant Portal เรียบร้อยครับ',
+          room: roomInfo || requestedRoomNum || '-',
+          billingMonth: billingMeta.billingMonthText || '-',
+          status: 'ชำระแล้ว',
+          paidAmount: slipAmount.toLocaleString('th-TH'),
+          remaining: '0',
+          paymentNote: 'สถานะห้องของคุณถูกอัปเดตเป็น “ชำระแล้ว” แล้วครับ 😊',
+          portalUrl: TENANT_PORTAL_URL,
+        }, lineTemplates);
+        if (TOKEN && lineUserId) {
+          const tenantPaymentPush = await pushLine(TOKEN, lineUserId, tenantPaymentMessage, { portalFlex: true });
+          if (tenantPaymentPush?.ok) {
+            await appendRoomLineHistory(requestedRoomNum, 'paymentConfirmation', tenantPaymentMessage, lineUserId, { source: 'portal-easy-slip' });
+            await markPortalPromptSent(requestedRoomNum, 'paymentConfirmation', tenantPaymentMessage);
+          }
+        }
+        if (TOKEN && OWNER_ID) {
+          await pushLine(
+            TOKEN,
+            OWNER_ID,
+            '✅ สลิปจาก Tenant Portal ถูกต้อง! อัปเดตสถานะแล้วครับ' +
+              '\n🏠 ' + roomInfo +
+              '\n✏️ ผู้โอน: ' + sender +
+              '\n💰 ยอด: ' + slipAmount.toLocaleString('th-TH') +
+              ' ฿ (ยอดที่ต้องชำระ ' + totalDue.toLocaleString('th-TH') + ' ฿)' +
+              '\n📅 ' + dt +
+              '\n🔢 Ref: ' + ref
+          );
+        }
+      } else {
+        const tenantPartialMessage = renderLineTemplate('paymentConfirmation', {
+          paymentTitle: 'ได้รับสลิปจาก Tenant Portal และบันทึกยอดชำระแล้วครับ',
+          room: roomInfo || requestedRoomNum || '-',
+          billingMonth: billingMeta.billingMonthText || '-',
+          status: 'รับชำระบางส่วน',
+          paidAmount: slipAmount.toLocaleString('th-TH'),
+          remaining: applyResult.remainingTotal.toLocaleString('th-TH'),
+          paymentNote: 'กรุณาชำระยอดคงเหลือภายหลังครับ',
+          portalUrl: TENANT_PORTAL_URL,
+        }, lineTemplates);
+        if (TOKEN && lineUserId) {
+          const tenantPartialPush = await pushLine(TOKEN, lineUserId, tenantPartialMessage, { portalFlex: true });
+          if (tenantPartialPush?.ok) {
+            await appendRoomLineHistory(requestedRoomNum, 'paymentConfirmation', tenantPartialMessage, lineUserId, { source: 'portal-easy-slip' });
+            await markPortalPromptSent(requestedRoomNum, 'paymentConfirmation', tenantPartialMessage);
+          }
+        }
+        if (TOKEN && OWNER_ID) {
+          await pushLine(
+            TOKEN,
+            OWNER_ID,
+            '⚠️ รับชำระบางส่วนจาก Tenant Portal ครับ' +
+              '\n🏠 ' + roomInfo +
+              '\n✏️ ผู้โอน: ' + sender +
+              '\n💰 ยอดที่โอน: ' + slipAmount.toLocaleString('th-TH') + ' ฿' +
+              '\n💰 ยอดที่ต้องชำระทั้งหมด: ' + totalDue.toLocaleString('th-TH') + ' ฿' +
+              '\n💰 คงเหลือ: ' + applyResult.remainingTotal.toLocaleString('th-TH') + ' ฿' +
+              '\n📅 ' + dt +
+              '\n🔢 Ref: ' + ref
+          );
+        }
+      }
+
+      await logEvent({
+        action: status === 'verified' ? 'portalVerifiedSlip' : 'portalPartialSlipPayment',
+        message: 'Tenant Portal EasySlip payment applied',
+        roomNum: requestedRoomNum,
+        ref,
+        extra: applyResult,
+      });
+
+      return jsonResponse({
+        ok: true,
+        status,
+        roomNum: requestedRoomNum,
+        amount: slipAmount,
+        ref,
+        paidAmount: applyResult.appliedTotal,
+        remainingTotal: applyResult.remainingTotal,
+        message: status === 'verified'
+          ? 'ตรวจสลิปผ่านและอัปเดตสถานะชำระแล้วครับ'
+          : 'ตรวจสลิปผ่านและบันทึกเป็นการชำระบางส่วนแล้วครับ',
+      });
+
     } else if (body.action === 'createRepairRequest') {
       const idToken = String(body.idToken || '').trim();
       const lineLoginChannelId = String(env.LINE_LOGIN_CHANNEL_ID || '').trim();
