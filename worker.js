@@ -1750,7 +1750,7 @@ export default {
       const values = await Promise.all(keys.map(k => env.DB.get(k)));
       const backup = {
         app: 'pananth-rental',
-        version: 'v15.4.2.84',
+        version: 'v15.4.2.96',
         backupType,
         reason,
         backupId,

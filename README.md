@@ -1,4 +1,4 @@
-# Pananth Rental Backend Worker v15.4.2.36
+# Pananth Rental Backend Worker v15.4.2.96
 
 ชุดนี้สำหรับอัปโหลดขึ้น GitHub เพื่อ Deploy เฉพาะ Worker หลังบ้านเท่านั้น
 
@@ -13,7 +13,7 @@
 ## ไฟล์สำคัญ
 
 ```text
-worker.js                         = Worker หลังบ้าน v15.4.2.36
+worker.js                         = Worker หลังบ้าน v15.4.2.96
 wrangler.toml                     = config deploy Cloudflare Worker
 .github/workflows/deploy-worker.yml = GitHub Actions deploy อัตโนมัติ
 package.json                      = script ตรวจ syntax / deploy
