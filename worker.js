@@ -1,4 +1,4 @@
-// v15.4.2.94: Meter OCR via Google Cloud Vision + retain Portal slip upload / EasySlip duplicate guard
+// v15.4.2.100: Ignore non-slip LINE images instead of creating pending slip reviews
 const DEFAULT_LINE_TEMPLATES = Object.freeze({
   rentNotice: `🏠 {shopName} — ห้อง {room}
 {tenantNameLine}📅 รอบบิล {billingMonth}
@@ -1208,6 +1208,21 @@ export default {
       };
     };
 
+    const isLikelyNonSlipImageError = (message = '') => {
+      const text = String(message || '').toLowerCase();
+      return (
+        text.includes('validation_error') ||
+        text.includes('please provide either a payload string') ||
+        text.includes('payload string, a image file') ||
+        text.includes('payload string, an image file') ||
+        text.includes('base64 encoded image') ||
+        text.includes('image url') ||
+        text.includes('qr') && (text.includes('not found') || text.includes('not detect') || text.includes('not detected')) ||
+        text.includes('ไม่พบ qr') ||
+        text.includes('ไม่พบคิวอาร์')
+      );
+    };
+
     const logEvent = async ({
       level = 'info',
       action = 'log',
@@ -1750,7 +1765,7 @@ export default {
       const values = await Promise.all(keys.map(k => env.DB.get(k)));
       const backup = {
         app: 'pananth-rental',
-        version: 'v15.4.2.96',
+        version: 'v15.4.2.100',
         backupType,
         reason,
         backupId,
@@ -5392,8 +5407,6 @@ ${tenantName ? `คุณ ${tenantName}\n` : ''}${roomText}
 
             // ===== รูปสลิป =====
             if (event.type === 'message' && event.message?.type === 'image') {
-              await replyLine(TOKEN, event.replyToken, 'ได้รับข้อมูลแล้วครับ รอตรวจสอบสักครู่นะครับ 😊');
-
               const [configData, tenantsData, roomsData, paymentData, slipRefsData, arrearsData, monthClosuresData, lastCloseBackupData, lineTemplatesData] = await Promise.all([
                 env.DB.get('config'),
                 env.DB.get('tenants'),
@@ -5454,11 +5467,34 @@ ${tenantName ? `คุณ ${tenantName}\n` : ''}${roomText}
               }
 
               if (!slipData) {
+                if (isLikelyNonSlipImageError(slipCheckError)) {
+                  await pushLine(
+                    TOKEN,
+                    userId,
+                    'ได้รับรูปแล้วครับ 😊'
+                  );
+
+                  await logEvent({
+                    level: 'info',
+                    action: 'lineImageIgnoredAsNonSlip',
+                    message: slipCheckError || 'LINE image ignored because EasySlip did not detect a slip payload',
+                    roomNum,
+                    extra: { linkedRoomNums, userId },
+                  });
+                  continue;
+                }
+
                 const msg =
                   '🧾 มีสลิปเข้ามาครับ' +
                   '\n🏠 ' + roomInfo +
                   '\n\n⚠️ ตรวจไม่ได้ กรุณาตรวจสอบด้วยตนเองครับ' +
                   (slipCheckError ? '\n\nสาเหตุ: ' + slipCheckError : '');
+
+                await pushLine(
+                  TOKEN,
+                  userId,
+                  'ได้รับรูปแล้วครับ แต่ระบบตรวจสลิปอัตโนมัติไม่สำเร็จ\nกรุณารอเจ้าของตรวจสอบ หรือส่งสลิปที่ชัดเจนอีกครั้งครับ'
+                );
 
                 if (linkedRoomNums.length) {
                   await setPendingSlipReview(linkedRoomNums, {
