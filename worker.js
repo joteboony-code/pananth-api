@@ -1249,14 +1249,17 @@ export default {
       return base.replace(/\n{3,}/g, '\n\n').trim();
     };
 
-    const pushLine = async (token, to, text) => {
+    const pushLine = async (token, to, text, options = {}) => {
       if (!token || !to || !text) return { ok: false, error: 'Missing token/to/text' };
 
       const cleanedText = cleanTenantPortalLinkFromText(text);
       if (!cleanedText) return { ok: false, error: 'Message text became empty after portal link cleanup' };
 
       const messages = [{ type: 'text', text: cleanedText }];
-      if (TENANT_PORTAL_URL && to && to !== OWNER_ID) {
+      const shouldAttachPortalFlex =
+        options?.portalFlex === true ||
+        (options?.portalFlex !== false && TENANT_PORTAL_URL && to && to !== OWNER_ID);
+      if (TENANT_PORTAL_URL && shouldAttachPortalFlex) {
         messages.push(makeTenantPortalFlexButton(TENANT_PORTAL_URL));
       }
 
@@ -4143,7 +4146,7 @@ export default {
             paymentNote: 'เจ้าของตรวจสอบยอดและอัปเดตให้เรียบร้อยแล้ว',
             portalUrl: TENANT_PORTAL_URL,
           }, lineTemplates);
-          tenantNotify = await pushLine(TOKEN, userId, notifyText);
+          tenantNotify = await pushLine(TOKEN, userId, notifyText, { portalFlex: true });
           if (tenantNotify?.ok) {
             await appendRoomLineHistory(roomNum, 'paymentConfirmation', notifyText, userId, { source: 'manual-payment' });
             await markPortalPromptSent(roomNum, 'paymentConfirmation', notifyText);
@@ -4266,7 +4269,7 @@ export default {
 ${tenantName ? `คุณ ${tenantName}\n` : ''}${roomText}
 กรุณากดเปิด Portal เพื่อตรวจสอบข้อมูลค่าเช่าและสถานะล่าสุดครับ`;
         try {
-          const result = await pushLine(TOKEN, recipient.userId, message);
+          const result = await pushLine(TOKEN, recipient.userId, message, { portalFlex: true });
           if (result?.ok) {
             sentCount += 1;
             sentRooms.push(...roomNums);
@@ -4385,7 +4388,7 @@ ${tenantName ? `คุณ ${tenantName}\n` : ''}${roomText}
             tenantNameLine: recipient.tenantName ? '👤 ' + recipient.tenantName + '\n' : '',
             portalUrl: TENANT_PORTAL_URL,
           }, lineTemplates);
-          const result = await pushLine(TOKEN, recipient.userId, renderedAnnouncement);
+          const result = await pushLine(TOKEN, recipient.userId, renderedAnnouncement, { portalFlex: true });
           const ok = !!result?.ok;
           if (ok) {
             sentCount += 1;
@@ -4474,7 +4477,7 @@ ${tenantName ? `คุณ ${tenantName}\n` : ''}${roomText}
     // ===== ส่งข้อความจากเว็บ =====
     if (body.userId && body.message && !body.events) {
       try {
-        const result = await pushLine(TOKEN, body.userId, body.message);
+        const result = await pushLine(TOKEN, body.userId, body.message, { portalFlex: true });
         const roomNum = String(parseInt(body.roomNum || 0, 10) || '').trim();
         const messageKind = tenantSafeText(body.messageKind || 'webPush', 80);
         if (result.ok && roomNum && isValidRoomNum(roomNum)) {
@@ -4847,7 +4850,7 @@ ${tenantName ? `คุณ ${tenantName}\n` : ''}${roomText}
                     paymentNote: 'สถานะห้องของคุณถูกอัปเดตเป็น “ชำระแล้ว” แล้วครับ 😊',
                     portalUrl: TENANT_PORTAL_URL,
                   }, lineTemplates);
-                  const tenantPaymentPush = await pushLine(TOKEN, userId, tenantPaymentMessage);
+                  const tenantPaymentPush = await pushLine(TOKEN, userId, tenantPaymentMessage, { portalFlex: true });
                   if (tenantPaymentPush?.ok) {
                     await appendRoomLineHistory(roomNum, 'paymentConfirmation', tenantPaymentMessage, userId, { source: 'easy-slip' });
                     await markPortalPromptSent(roomNum, 'paymentConfirmation', tenantPaymentMessage);
@@ -4875,7 +4878,7 @@ ${tenantName ? `คุณ ${tenantName}\n` : ''}${roomText}
                     paymentNote: 'กรุณาชำระยอดคงเหลือภายหลังครับ',
                     portalUrl: TENANT_PORTAL_URL,
                   }, lineTemplates);
-                  const tenantPartialPush = await pushLine(TOKEN, userId, tenantPartialMessage);
+                  const tenantPartialPush = await pushLine(TOKEN, userId, tenantPartialMessage, { portalFlex: true });
                   if (tenantPartialPush?.ok) {
                     await appendRoomLineHistory(roomNum, 'paymentConfirmation', tenantPartialMessage, userId, { source: 'easy-slip' });
                     await markPortalPromptSent(roomNum, 'paymentConfirmation', tenantPartialMessage);
@@ -5130,14 +5133,17 @@ async function runAutoRentReminder(env) {
     return base.replace(/\n{3,}/g, '\n\n').trim();
   };
 
-  const pushLine = async (to, text) => {
+  const pushLine = async (to, text, options = {}) => {
     if (!TOKEN || !to || !text) return { ok: false, error: 'Missing token/to/text' };
 
     const cleanedText = cleanTenantPortalLinkFromText(text);
     if (!cleanedText) return { ok: false, error: 'Message text became empty after portal link cleanup' };
 
     const messages = [{ type: 'text', text: cleanedText }];
-    if (TENANT_PORTAL_URL && to && to !== OWNER_ID) {
+    const shouldAttachPortalFlex =
+      options?.portalFlex === true ||
+      (options?.portalFlex !== false && TENANT_PORTAL_URL && to && to !== OWNER_ID);
+    if (TENANT_PORTAL_URL && shouldAttachPortalFlex) {
       messages.push(makeTenantPortalFlexButton(TENANT_PORTAL_URL));
     }
 
@@ -5415,7 +5421,7 @@ async function runAutoRentReminder(env) {
     }, lineTemplates);
 
     try {
-      const result = await pushLine(userId, message);
+      const result = await pushLine(userId, message, { portalFlex: true });
 
       if (result.ok) {
         sent++;
