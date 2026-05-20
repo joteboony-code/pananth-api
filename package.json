@@ -1,0 +1,13 @@
+{
+  "name": "pananth-rental-worker",
+  "version": "15.4.2.100",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "check": "node --check worker.js"
+  },
+  "devDependencies": {
+    "wrangler": "latest"
+  }
+}

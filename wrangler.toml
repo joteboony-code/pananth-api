@@ -1,0 +1,43 @@
+# Cloudflare Worker deploy config: Pananth rental backend only
+# ใช้ไฟล์นี้สำหรับ Deploy Worker หลังบ้านเท่านั้น ไม่รวม index.html / PWA frontend
+
+name = "white-rice-cf72"
+main = "worker.js"
+compatibility_date = "2026-05-10"
+workers_dev = true
+
+# Cron ตรวจงานอัตโนมัติทุกวัน
+# เวลา Cloudflare ใช้ UTC: 02:00 UTC = 09:00 ไทย
+# - แจ้งเตือนค่าเช่ายังคุมวัน 5,10,15,20,25 ใน worker.js
+# - แจ้งเตือนสัญญาใกล้หมดตรวจทุกวัน
+[triggers]
+crons = ["0 2 * * *"]
+
+# ===== KV Binding =====
+# สำคัญ: ต้องใส่ id ของ KV namespace ตัวเดิมที่ใช้งานจริง
+# Binding name ต้องเป็น DB เพราะ worker.js เรียก env.DB
+[[kv_namespaces]]
+binding = "DB"
+id = "7c8d875ca0a0471097dcfa7dfec78203"
+
+# ===== R2 Binding =====
+# สำคัญ: ต้องใส่ bucket_name ของ R2 bucket ตัวเดิมที่ใช้ backup
+# Binding name ต้องเป็น RENTAL_R2 เพราะ worker.js เรียก env.RENTAL_R2
+[[r2_buckets]]
+binding = "RENTAL_R2"
+bucket_name = "pananth-rental-backup"
+
+# ===== Non-secret variables =====
+# ตัวแปรที่ไม่ใช่ความลับ ใส่ใน repo ได้
+[vars]
+R2_AUTO_BACKUP_RETENTION_DAYS = "180"
+# ADMIN_ORIGIN = "https://pananth.joteboony.workers.dev"
+# ALLOWED_ORIGINS = "https://pananth.joteboony.workers.dev"
+
+# ===== Secrets ที่ห้ามใส่ใน GitHub repo =====
+# ตั้งไว้ที่ Cloudflare Worker Settings > Variables > Secrets ของ Worker หลังบ้านแทน:
+# LINE_TOKEN
+# LINE_CHANNEL_SECRET
+# EASYSLIP_API_KEY
+# OWNER_ID
+# ADMIN_UNLOCK_KEY
