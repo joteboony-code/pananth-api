@@ -1177,61 +1177,56 @@ export default {
     };
 
     const makeTenantPortalFlexButton = (portalUrl) => ({
-      type: 'flex',
-      altText: '🏠 ดูข้อมูลค่าเช่าใน Tenant Portal',
-      contents: {
-        type: 'bubble',
-        size: 'kilo',
-        body: {
-          type: 'box',
-          layout: 'horizontal',
-          spacing: 'md',
-          paddingAll: '16px',
-          backgroundColor: '#1455a4',
-          contents: [
-            {
+          type: 'flex',
+          altText: '🏠 เปิดข้อมูลค่าเช่าใน Tenant Portal',
+          contents: {
+            type: 'bubble',
+            size: 'mega',
+            body: {
               type: 'box',
               layout: 'vertical',
-              flex: 1,
-              justifyContent: 'center',
+              spacing: 'sm',
+              paddingAll: '16px',
+              backgroundColor: '#1455a4',
               contents: [
                 {
                   type: 'text',
                   text: '🏠 ป้านันท์ Tenant Portal',
                   color: '#ffffff',
-                  size: 'sm',
+                  size: 'md',
                   weight: 'bold',
-                  wrap: false,
+                  wrap: true,
                 },
                 {
                   type: 'text',
                   text: 'ดูค่าเช่า มิเตอร์ และสถานะล่าสุด',
-                  color: '#c8dff7',
-                  size: 'xs',
-                  margin: 'xs',
-                  wrap: false,
+                  color: '#dbeafe',
+                  size: 'sm',
+                  wrap: true,
                 },
               ],
             },
-            {
-              type: 'button',
-              style: 'primary',
-              color: '#ffffff',
-              height: 'sm',
-              flex: 0,
-              action: {
-                type: 'uri',
-                label: 'เปิดดู',
-                uri: portalUrl,
-              },
+            footer: {
+              type: 'box',
+              layout: 'vertical',
+              paddingAll: '12px',
+              backgroundColor: '#1455a4',
+              contents: [
+                {
+                  type: 'button',
+                  style: 'primary',
+                  color: '#06C755',
+                  height: 'sm',
+                  action: {
+                    type: 'uri',
+                    label: 'เปิดข้อมูลค่าเช่า',
+                    uri: portalUrl,
+                  },
+                },
+              ],
             },
-          ],
-        },
-        styles: {
-          body: { separator: false },
-        },
-      },
-    });
+          },
+        });
 
     const cleanTenantPortalLinkFromText = (text = '') => {
       let base = String(text || '');
@@ -1270,6 +1265,182 @@ export default {
           Authorization: 'Bearer ' + token,
         },
         body: JSON.stringify({ to, messages }),
+      });
+
+      let result = {};
+      try { result = await res.json(); } catch (_) {}
+
+      return { ok: res.ok, status: res.status, result };
+    };
+
+
+    const rentFlexText = (value, fallback = '') => {
+      const text = String(value === undefined || value === null ? fallback : value).trim();
+      return text.slice(0, 220);
+    };
+
+    const rentFlexAmount = (value) => {
+      const num = Number(value || 0);
+      return Number.isFinite(num) ? Math.round(num) : 0;
+    };
+
+    const makeRentNoticeFlex = (data = {}, portalUrl = TENANT_PORTAL_URL) => {
+      const room = rentFlexText(data.room || data.roomNum || '-', '-');
+      const shopName = rentFlexText(data.shopName || 'ห้องเช่าป้านันท์', 'ห้องเช่าป้านันท์');
+      const tenantName = rentFlexText(data.tenantName || '');
+      const billingMonth = rentFlexText(data.billingMonth || data.month || '-', '-');
+      const totalDue = rentFlexAmount(data.totalDue);
+      const rentLabel = rentFlexText(data.rentLabel || 'ค่าเช่า', 'ค่าเช่า');
+      const bankText = rentFlexText(data.bank || '').replace(/\s*\n+\s*/g, ' • ');
+
+      const priceText = (value, signed = false) => {
+        const amount = rentFlexAmount(value);
+        const prefix = signed && amount > 0 ? '-' : '';
+        return `${prefix}${Math.abs(amount).toLocaleString('th-TH')} บาท`;
+      };
+
+      const makeRow = (label, amount, signed = false) => ({
+        type: 'box',
+        layout: 'horizontal',
+        margin: 'sm',
+        contents: [
+          {
+            type: 'text',
+            text: rentFlexText(label, '-'),
+            size: 'sm',
+            color: '#5B6472',
+            flex: 1,
+            wrap: true,
+          },
+          {
+            type: 'text',
+            text: priceText(amount, signed),
+            size: 'sm',
+            color: signed ? '#167C48' : '#111827',
+            weight: 'bold',
+            align: 'end',
+            flex: 0,
+            wrap: false,
+          },
+        ],
+      });
+
+      const billRows = [];
+      billRows.push(makeRow(rentLabel, data.rent || 0));
+      billRows.push(makeRow('ค่าน้ำ', data.waterAmount || 0));
+      billRows.push(makeRow('ค่าไฟ', data.electricAmount || 0));
+      billRows.push(makeRow('ค่าขยะ', data.trash || 0));
+      if (rentFlexAmount(data.wifi) > 0) billRows.push(makeRow('WiFi', data.wifi || 0));
+      if (rentFlexAmount(data.oldDebt) > 0) billRows.push(makeRow('ยอดค้างเก่า', data.oldDebt || 0));
+      if (rentFlexAmount(data.manualPaid) > 0) billRows.push(makeRow('ชำระแล้วบางส่วน', data.manualPaid || 0, true));
+
+      const bodyContents = [
+        {
+          type: 'text',
+          text: billingMonth,
+          size: 'sm',
+          color: '#6B7280',
+          wrap: true,
+        },
+        {
+          type: 'text',
+          text: `${Math.max(0, totalDue).toLocaleString('th-TH')} บาท`,
+          size: 'xxl',
+          weight: 'bold',
+          color: '#0F172A',
+          margin: 'md',
+          wrap: false,
+        },
+        {
+          type: 'separator',
+          margin: 'md',
+        },
+        ...billRows,
+      ];
+
+      if (bankText) {
+        bodyContents.push({
+          type: 'separator',
+          margin: 'md',
+        });
+        bodyContents.push({
+          type: 'text',
+          text: `🏦 ${bankText}`,
+          size: 'xs',
+          color: '#64748B',
+          margin: 'md',
+          wrap: true,
+        });
+      }
+
+      return {
+        type: 'flex',
+        altText: `ค่าเช่าห้อง ${room}: ${Math.max(0, totalDue).toLocaleString('th-TH')} บาท`,
+        contents: {
+          type: 'bubble',
+          size: 'mega',
+          header: {
+            type: 'box',
+            layout: 'vertical',
+            paddingAll: '16px',
+            backgroundColor: '#117C72',
+            contents: [
+              {
+                type: 'text',
+                text: 'แจ้งค่าเช่าของฉัน',
+                color: '#FFFFFF',
+                size: 'lg',
+                weight: 'bold',
+                wrap: true,
+              },
+              {
+                type: 'text',
+                text: `${shopName} · ห้อง ${room}${tenantName ? ` · ${tenantName}` : ''}`,
+                color: '#E6FFFA',
+                size: 'sm',
+                margin: 'sm',
+                wrap: true,
+              },
+            ],
+          },
+          body: {
+            type: 'box',
+            layout: 'vertical',
+            paddingAll: '18px',
+            contents: bodyContents,
+          },
+          footer: {
+            type: 'box',
+            layout: 'vertical',
+            paddingAll: '12px',
+            contents: [
+              {
+                type: 'button',
+                style: 'primary',
+                color: '#117C72',
+                height: 'md',
+                action: {
+                  type: 'uri',
+                  label: 'เปิดดูบิล / แนบสลิป',
+                  uri: portalUrl,
+                },
+              },
+            ],
+          },
+        },
+      };
+    };
+
+    const pushLineFlexOnly = async (token, to, flexMessage) => {
+      if (!token || !to || !flexMessage) return { ok: false, error: 'Missing token/to/flexMessage' };
+
+      const res = await fetch('https://api.line.me/v2/bot/message/push', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer ' + token,
+        },
+        body: JSON.stringify({ to, messages: [flexMessage] }),
       });
 
       let result = {};
@@ -4449,6 +4620,36 @@ ${tenantName ? `คุณ ${tenantName}\n` : ''}${roomText}
       }, failedCount === 0 ? 200 : 207);
     }
 
+
+    if (body.action === 'sendRentNoticeFlex') {
+      try {
+        const recipientId = body.toOwner === true ? OWNER_ID : String(body.userId || '').trim();
+        if (!recipientId) {
+          return jsonResponse({ ok: false, error: 'ไม่พบ LINE User ID สำหรับส่ง Flex แจ้งค่าเช่า' }, 400);
+        }
+        const flexData = body.flexData && typeof body.flexData === 'object' && !Array.isArray(body.flexData)
+          ? body.flexData
+          : {};
+        const flexMessage = makeRentNoticeFlex(flexData, TENANT_PORTAL_URL);
+        const result = await pushLineFlexOnly(TOKEN, recipientId, flexMessage);
+        const roomNum = String(parseInt(body.roomNum || flexData.room || flexData.roomNum || 0, 10) || '').trim();
+        const historySummary = `📗 Flex แจ้งค่าเช่า — ห้อง ${roomNum || '-'} ยอด ${rentFlexAmount(flexData.totalDue).toLocaleString('th-TH')} บาท`;
+        if (result.ok && roomNum && isValidRoomNum(roomNum)) {
+          await appendRoomLineHistory(roomNum, 'rentNoticeFlex', historySummary, recipientId, { source: body.toOwner === true ? 'web-flex-owner-test' : 'web-flex' });
+          await markPortalPromptSent(roomNum, 'rentNoticeFlex', historySummary);
+        }
+        if (!result.ok) {
+          await logEvent({ level: 'error', action: 'sendRentNoticeFlex', message: JSON.stringify(result), roomNum });
+        } else {
+          await logEvent({ action: 'sendRentNoticeFlex', message: 'Rent notice Flex sent', roomNum, extra: { toOwner: body.toOwner === true } });
+        }
+        return jsonResponse(result, result.ok ? 200 : 500);
+      } catch (err) {
+        await logEvent({ level: 'error', action: 'sendRentNoticeFlex', message: err.message });
+        return jsonResponse({ ok: false, error: err.message }, 500);
+      }
+    }
+
     if (body.action === 'sendOwnerMessage') {
       try {
         const result = await pushLine(TOKEN, OWNER_ID, body.message || '');
@@ -5061,61 +5262,56 @@ async function runAutoRentReminder(env) {
   const day = todayBangkok.getDate();
 
   const makeTenantPortalFlexButton = (portalUrl) => ({
-    type: 'flex',
-    altText: '🏠 ดูข้อมูลค่าเช่าใน Tenant Portal',
-    contents: {
-      type: 'bubble',
-      size: 'kilo',
-      body: {
-        type: 'box',
-        layout: 'horizontal',
-        spacing: 'md',
-        paddingAll: '16px',
-        backgroundColor: '#1455a4',
-        contents: [
-          {
+        type: 'flex',
+        altText: '🏠 เปิดข้อมูลค่าเช่าใน Tenant Portal',
+        contents: {
+          type: 'bubble',
+          size: 'mega',
+          body: {
             type: 'box',
             layout: 'vertical',
-            flex: 1,
-            justifyContent: 'center',
+            spacing: 'sm',
+            paddingAll: '16px',
+            backgroundColor: '#1455a4',
             contents: [
               {
                 type: 'text',
                 text: '🏠 ป้านันท์ Tenant Portal',
                 color: '#ffffff',
-                size: 'sm',
+                size: 'md',
                 weight: 'bold',
-                wrap: false,
+                wrap: true,
               },
               {
                 type: 'text',
                 text: 'ดูค่าเช่า มิเตอร์ และสถานะล่าสุด',
-                color: '#c8dff7',
-                size: 'xs',
-                margin: 'xs',
-                wrap: false,
+                color: '#dbeafe',
+                size: 'sm',
+                wrap: true,
               },
             ],
           },
-          {
-            type: 'button',
-            style: 'primary',
-            color: '#ffffff',
-            height: 'sm',
-            flex: 0,
-            action: {
-              type: 'uri',
-              label: 'เปิดดู',
-              uri: portalUrl,
-            },
+          footer: {
+            type: 'box',
+            layout: 'vertical',
+            paddingAll: '12px',
+            backgroundColor: '#1455a4',
+            contents: [
+              {
+                type: 'button',
+                style: 'primary',
+                color: '#06C755',
+                height: 'sm',
+                action: {
+                  type: 'uri',
+                  label: 'เปิดข้อมูลค่าเช่า',
+                  uri: portalUrl,
+                },
+              },
+            ],
           },
-        ],
-      },
-      styles: {
-        body: { separator: false },
-      },
-    },
-  });
+        },
+      });
 
   const cleanTenantPortalLinkFromText = (text = '') => {
     let base = String(text || '');
