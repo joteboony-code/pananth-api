@@ -1176,15 +1176,70 @@ export default {
       return { restoredKeys, restoredArchives };
     };
 
-    const appendTenantPortalLink = (to, text = '') => {
-      const base = String(text || '');
-      if (!TENANT_PORTAL_URL || !to || to === OWNER_ID) return base;
-      if (base.includes(TENANT_PORTAL_URL)) return base;
-      return base + '\n\n🏠 ดูข้อมูลค่าเช่าและสถานะล่าสุดใน Tenant Portal:\n' + TENANT_PORTAL_URL;
-    };
+    const makeTenantPortalFlexButton = (portalUrl) => ({
+      type: 'flex',
+      altText: '🏠 ดูข้อมูลค่าเช่าใน Tenant Portal',
+      contents: {
+        type: 'bubble',
+        size: 'kilo',
+        body: {
+          type: 'box',
+          layout: 'horizontal',
+          spacing: 'md',
+          paddingAll: '16px',
+          backgroundColor: '#1455a4',
+          contents: [
+            {
+              type: 'box',
+              layout: 'vertical',
+              flex: 1,
+              justifyContent: 'center',
+              contents: [
+                {
+                  type: 'text',
+                  text: '🏠 ป้านันท์ Tenant Portal',
+                  color: '#ffffff',
+                  size: 'sm',
+                  weight: 'bold',
+                  wrap: false,
+                },
+                {
+                  type: 'text',
+                  text: 'ดูค่าเช่า มิเตอร์ และสถานะล่าสุด',
+                  color: '#c8dff7',
+                  size: 'xs',
+                  margin: 'xs',
+                  wrap: false,
+                },
+              ],
+            },
+            {
+              type: 'button',
+              style: 'primary',
+              color: '#ffffff',
+              height: 'sm',
+              flex: 0,
+              action: {
+                type: 'uri',
+                label: 'เปิดดู',
+                uri: portalUrl,
+              },
+            },
+          ],
+        },
+        styles: {
+          body: { separator: false },
+        },
+      },
+    });
 
     const pushLine = async (token, to, text) => {
       if (!token || !to || !text) return { ok: false, error: 'Missing token/to/text' };
+
+      const messages = [{ type: 'text', text: String(text || '') }];
+      if (TENANT_PORTAL_URL && to && to !== OWNER_ID && !String(text || '').includes(TENANT_PORTAL_URL)) {
+        messages.push(makeTenantPortalFlexButton(TENANT_PORTAL_URL));
+      }
 
       const res = await fetch('https://api.line.me/v2/bot/message/push', {
         method: 'POST',
@@ -1192,10 +1247,7 @@ export default {
           'Content-Type': 'application/json',
           Authorization: 'Bearer ' + token,
         },
-        body: JSON.stringify({
-          to,
-          messages: [{ type: 'text', text: appendTenantPortalLink(to, text) }],
-        }),
+        body: JSON.stringify({ to, messages }),
       });
 
       let result = {};
@@ -4986,15 +5038,70 @@ async function runAutoRentReminder(env) {
 
   const day = todayBangkok.getDate();
 
-  const appendTenantPortalLink = (to, text = '') => {
-    const base = String(text || '');
-    if (!TENANT_PORTAL_URL || !to || to === OWNER_ID) return base;
-    if (base.includes(TENANT_PORTAL_URL)) return base;
-    return base + '\n\n🏠 ดูข้อมูลค่าเช่าและสถานะล่าสุดใน Tenant Portal:\n' + TENANT_PORTAL_URL;
-  };
+  const makeTenantPortalFlexButton = (portalUrl) => ({
+    type: 'flex',
+    altText: '🏠 ดูข้อมูลค่าเช่าใน Tenant Portal',
+    contents: {
+      type: 'bubble',
+      size: 'kilo',
+      body: {
+        type: 'box',
+        layout: 'horizontal',
+        spacing: 'md',
+        paddingAll: '16px',
+        backgroundColor: '#1455a4',
+        contents: [
+          {
+            type: 'box',
+            layout: 'vertical',
+            flex: 1,
+            justifyContent: 'center',
+            contents: [
+              {
+                type: 'text',
+                text: '🏠 ป้านันท์ Tenant Portal',
+                color: '#ffffff',
+                size: 'sm',
+                weight: 'bold',
+                wrap: false,
+              },
+              {
+                type: 'text',
+                text: 'ดูค่าเช่า มิเตอร์ และสถานะล่าสุด',
+                color: '#c8dff7',
+                size: 'xs',
+                margin: 'xs',
+                wrap: false,
+              },
+            ],
+          },
+          {
+            type: 'button',
+            style: 'primary',
+            color: '#ffffff',
+            height: 'sm',
+            flex: 0,
+            action: {
+              type: 'uri',
+              label: 'เปิดดู',
+              uri: portalUrl,
+            },
+          },
+        ],
+      },
+      styles: {
+        body: { separator: false },
+      },
+    },
+  });
 
   const pushLine = async (to, text) => {
     if (!TOKEN || !to || !text) return { ok: false, error: 'Missing token/to/text' };
+
+    const messages = [{ type: 'text', text: String(text || '') }];
+    if (TENANT_PORTAL_URL && to && to !== OWNER_ID && !String(text || '').includes(TENANT_PORTAL_URL)) {
+      messages.push(makeTenantPortalFlexButton(TENANT_PORTAL_URL));
+    }
 
     const res = await fetch('https://api.line.me/v2/bot/message/push', {
       method: 'POST',
@@ -5002,10 +5109,7 @@ async function runAutoRentReminder(env) {
         'Content-Type': 'application/json',
         Authorization: 'Bearer ' + TOKEN,
       },
-      body: JSON.stringify({
-        to,
-        messages: [{ type: 'text', text: appendTenantPortalLink(to, text) }],
-      }),
+      body: JSON.stringify({ to, messages }),
     });
 
     let result = {};
