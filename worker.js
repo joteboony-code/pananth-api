@@ -6618,8 +6618,8 @@ async function runAutoRentReminder(env) {
       detailLines,
       totalDue: totalDue.toLocaleString('th-TH'),
       bank: Number(i) <= 20
-        ? 'โอนเข้า บัญชี ttb 919-7-253892\nนายบุญรัตน์ ชลา\nส่งสลิปที่ไลน์นี้นะครับ'
-        : 'โอนเข้า บัญชี กรุงศรีอยุธยา 800-4-557541\nบุญรัตน์ ชลา\nส่งสลิปที่ไลน์นี้นะครับ',
+        ? 'โอนเข้า บัญชี ttb 919-7-253892\nนายบุญรัตน์ ชลา'
+        : 'โอนเข้า บัญชี กรุงศรีอยุธยา 800-4-557541\nบุญรัตน์ ชลา',
       portalUrl: TENANT_PORTAL_URL,
     }, lineTemplates);
 
