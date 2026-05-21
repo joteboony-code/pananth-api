@@ -146,6 +146,7 @@ export default {
 
     // ===== TENANT PORTAL SLIP UPLOAD =====
     // ผู้เช่าส่งสลิปจาก Tenant Portal ได้อีกช่องทาง โดยใช้ EasySlip + slipRefs ชุดเดียวกับหน้าแชต
+    const TENANT_SLIP_PREFIX = 'tenant-slips/';
     const PORTAL_SLIP_ALLOWED_MIME = new Set([
       'image/jpeg',
       'image/png',
@@ -760,6 +761,20 @@ export default {
         : '';
     };
 
+    const assertSafeTenantSlipKey = (key = '') => {
+      const safeKey = tenantSafeText(key || '', 420);
+      return safeKey.startsWith(TENANT_SLIP_PREFIX) && !safeKey.includes('..')
+        ? safeKey
+        : '';
+    };
+
+    const tenantSlipExtFromMime = (mime = '') => {
+      if (mime === 'image/jpeg') return 'jpg';
+      if (mime === 'image/png') return 'png';
+      if (mime === 'image/webp') return 'webp';
+      return 'jpg';
+    };
+
 
     const assertSafeMeterPhotoKey = (key = '') => {
       const safeKey = tenantSafeText(key || '', 420);
@@ -899,9 +914,49 @@ export default {
           lineUserId: tenantSafeText(row.lineUserId || '', 160),
           amount: tenantSafeNumber(row.amount || 0, 0),
           ref: tenantSafeText(row.ref || '', 160),
+          slipImageId: tenantSafeText(row.slipImageId || '', 80),
+          slipImageKey: assertSafeTenantSlipKey(row.slipImageKey || row.key || ''),
+          slipImageFileName: tenantSafeText(row.slipImageFileName || row.fileName || '', 180),
+          slipImageMimeType: tenantSafeText(row.slipImageMimeType || row.mimeType || '', 80),
+          slipImageSize: tenantSafeNumber(row.slipImageSize || row.size || 0, 0),
           updatedAt: tenantSafeText(row.updatedAt || '', 80),
           updatedAtText: tenantSafeText(row.updatedAtText || '', 120),
         };
+      }
+      return out;
+    };
+
+    const sanitizeTenantSlipArchive = (input = {}) => {
+      const out = {};
+      if (!input || typeof input !== 'object' || Array.isArray(input)) return out;
+      for (const [roomKey, rowsRaw] of Object.entries(input || {})) {
+        const roomNum = String(parseInt(roomKey || 0, 10) || '').trim();
+        if (!roomNum || !isValidRoomNum(roomNum)) continue;
+        const rows = Array.isArray(rowsRaw) ? rowsRaw : [];
+        out[roomNum] = rows.slice(-240).map(rowRaw => {
+          const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
+          const key = assertSafeTenantSlipKey(row.key || row.objectKey || '');
+          if (!key) return null;
+          return {
+            id: tenantSafeText(row.id || randomToken().slice(0, 24), 80),
+            roomNum,
+            key,
+            fileName: tenantSafeText(row.fileName || row.originalName || '', 180),
+            mimeType: tenantSafeText(row.mimeType || row.contentType || '', 80),
+            size: tenantSafeNumber(row.size || 0, 0),
+            source: tenantSafeText(row.source || '', 80),
+            status: tenantSafeText(row.status || 'received', 80),
+            note: tenantSafeText(row.note || '', 300),
+            lineUserId: tenantSafeText(row.lineUserId || '', 160),
+            tenantName: tenantSafeText(row.tenantName || '', 180),
+            amount: tenantSafeNumber(row.amount || 0, 0),
+            ref: tenantSafeText(row.ref || '', 160),
+            billingMonthKey: tenantSafeText(row.billingMonthKey || '', 20),
+            billingMonthText: tenantSafeText(row.billingMonthText || '', 120),
+            uploadedAt: tenantSafeText(row.uploadedAt || row.createdAt || '', 80),
+            uploadedAtText: tenantSafeText(row.uploadedAtText || row.createdAtText || '', 120),
+          };
+        }).filter(Boolean);
       }
       return out;
     };
@@ -1038,12 +1093,84 @@ export default {
           lineUserId: tenantSafeText(payload.lineUserId || '', 160),
           amount: tenantSafeNumber(payload.amount || 0, 0),
           ref: tenantSafeText(payload.ref || '', 160),
+          slipImageId: tenantSafeText(payload.slipImageId || '', 80),
+          slipImageKey: assertSafeTenantSlipKey(payload.slipImageKey || ''),
+          slipImageFileName: tenantSafeText(payload.slipImageFileName || '', 180),
+          slipImageMimeType: tenantSafeText(payload.slipImageMimeType || '', 80),
+          slipImageSize: tenantSafeNumber(payload.slipImageSize || 0, 0),
           updatedAt: now.toISOString(),
           updatedAtText: thTime(now),
         };
       });
       await putKVJson('pendingSlipReviews', store);
       return store;
+    };
+
+    const saveTenantSlipImage = async ({
+      roomNum,
+      bytes,
+      mimeType = 'image/jpeg',
+      source = 'Tenant Portal',
+      status = 'received',
+      note = '',
+      lineUserId = '',
+      tenantName = '',
+      amount = 0,
+      ref = '',
+      billingMeta = {},
+      fileName = 'tenant-slip',
+    } = {}) => {
+      const safeRoomNum = String(parseInt(roomNum || 0, 10) || '').trim();
+      if (!safeRoomNum || !isValidRoomNum(safeRoomNum)) return null;
+      if (!bytes || !bytes.byteLength) return null;
+      if (!env.RENTAL_R2 || typeof env.RENTAL_R2.put !== 'function') return null;
+      const cleanMime = tenantSafeText(mimeType || 'image/jpeg', 80).toLowerCase();
+      const ext = tenantSlipExtFromMime(cleanMime);
+      const now = new Date();
+      const uploadedAt = now.toISOString();
+      const uploadedAtText = thTime(now);
+      const originalName = safeTenantFileName(fileName || 'tenant-slip');
+      const id = randomToken().slice(0, 24);
+      const objectKey = `${TENANT_SLIP_PREFIX}room-${safeRoomNum}/${uploadedAt.slice(0, 10)}/${Date.now()}-${id}-${originalName}.${ext}`;
+      const row = {
+        id,
+        roomNum: safeRoomNum,
+        key: objectKey,
+        fileName: originalName + '.' + ext,
+        mimeType: cleanMime,
+        size: Number(bytes.byteLength || 0),
+        source: tenantSafeText(source || 'Tenant Portal', 80),
+        status: tenantSafeText(status || 'received', 80),
+        note: tenantSafeText(note || '', 300),
+        lineUserId: tenantSafeText(lineUserId || '', 160),
+        tenantName: tenantSafeText(tenantName || '', 180),
+        amount: tenantSafeNumber(amount || 0, 0),
+        ref: tenantSafeText(ref || '', 160),
+        billingMonthKey: tenantSafeText(billingMeta?.billingMonthKey || '', 20),
+        billingMonthText: tenantSafeText(billingMeta?.billingMonthText || '', 120),
+        uploadedAt,
+        uploadedAtText,
+      };
+      await env.RENTAL_R2.put(objectKey, bytes, {
+        httpMetadata: { contentType: cleanMime },
+        customMetadata: {
+          roomNum: safeRoomNum,
+          source: row.source,
+          status: row.status,
+          ref: row.ref,
+          amount: String(row.amount || 0),
+          lineUserId: row.lineUserId,
+          tenantName: row.tenantName,
+          originalName: row.fileName,
+          uploadedAt,
+        },
+      });
+      const archive = sanitizeTenantSlipArchive(await getKVJson('tenantSlipArchive', {}));
+      const rows = Array.isArray(archive[safeRoomNum]) ? archive[safeRoomNum] : [];
+      rows.push(row);
+      archive[safeRoomNum] = rows.slice(-240);
+      await putKVJson('tenantSlipArchive', archive);
+      return row;
     };
 
     const clearPendingSlipReview = async (roomNum) => {
@@ -1258,7 +1385,7 @@ export default {
         paymentHistory: 'array', expenses: 'array', logs: 'array', slipRefs: 'object',
         monthClosures: 'object', lockedMonths: 'object', arrears: 'object', editHistory: 'array',
         monthlyArchiveIndex: 'object', portalMessageState: 'object', lineRoomMessages: 'object',
-        pendingSlipReviews: 'object', meterPhotos: 'object', repairRequests: 'array'
+        pendingSlipReviews: 'object', tenantSlipArchive: 'object', meterPhotos: 'object', repairRequests: 'array'
       };
       for (const [key, expected] of Object.entries(restoreSchema)) {
         if (data[key] === undefined || data[key] === null) continue;
@@ -1287,6 +1414,7 @@ export default {
         ['portalMessageState', {}],
         ['lineRoomMessages', {}],
         ['pendingSlipReviews', {}],
+        ['tenantSlipArchive', {}],
         ['meterPhotos', {}],
         ['repairRequests', []],
         ['history', {}],
@@ -1312,6 +1440,7 @@ export default {
           else if (key === 'portalMessageState') value = sanitizePortalMessageState(data[key] || {});
           else if (key === 'lineRoomMessages') value = sanitizeLineRoomMessages(data[key] || {});
           else if (key === 'pendingSlipReviews') value = sanitizePendingSlipReviews(data[key] || {});
+          else if (key === 'tenantSlipArchive') value = sanitizeTenantSlipArchive(data[key] || {});
           else if (key === 'meterPhotos') value = sanitizeMeterPhotoMap(data[key] || {});
           else if (key === 'repairRequests') value = sanitizeRepairRequests(data[key] || []);
           await putKVJson(key, value);
@@ -1761,7 +1890,7 @@ export default {
       const now = new Date();
       const pad = n => String(n).padStart(2, '0');
       const backupId = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-      const keys = ['rooms','config','shopinfo','tenants','tenantProfiles','lineTemplates','portalMessageState','lineRoomMessages','pendingSlipReviews','meterPhotos','history','paymentHistory','expenses','logs','slipRefs','monthClosures','lockedMonths','lastCloseBackup','arrears','editHistory','monthlyArchiveIndex'];
+      const keys = ['rooms','config','shopinfo','tenants','tenantProfiles','lineTemplates','portalMessageState','lineRoomMessages','pendingSlipReviews','tenantSlipArchive','meterPhotos','history','paymentHistory','expenses','logs','slipRefs','monthClosures','lockedMonths','lastCloseBackup','arrears','editHistory','monthlyArchiveIndex'];
       const values = await Promise.all(keys.map(k => env.DB.get(k)));
       const backup = {
         app: 'pananth-rental',
@@ -1790,9 +1919,11 @@ export default {
                   ? sanitizeLineRoomMessages(parsed || {})
                   : (k === 'pendingSlipReviews'
                     ? sanitizePendingSlipReviews(parsed || {})
-                    : (k === 'meterPhotos'
-                      ? sanitizeMeterPhotoMap(parsed || {})
-                      : parsed))))));
+                    : (k === 'tenantSlipArchive'
+                      ? sanitizeTenantSlipArchive(parsed || {})
+                      : (k === 'meterPhotos'
+                        ? sanitizeMeterPhotoMap(parsed || {})
+                        : parsed)))))));
       });
 
       const cfgMeta = getBillingMetaFromConfig(backup.config || {});
@@ -2448,6 +2579,27 @@ export default {
         });
       }
 
+      if (getAction === 'tenantSlip') {
+        if (!env.RENTAL_R2 || typeof env.RENTAL_R2.get !== 'function') {
+          return jsonResponse({ ok: false, error: 'Missing RENTAL_R2 binding' }, 500);
+        }
+        const key = assertSafeTenantSlipKey(getUrl.searchParams.get('key') || '');
+        if (!key) return jsonResponse({ ok: false, error: 'Invalid tenant slip key' }, 400);
+        const obj = await env.RENTAL_R2.get(key);
+        if (!obj) return jsonResponse({ ok: false, error: 'Tenant slip not found' }, 404);
+        const contentType = obj.httpMetadata?.contentType || obj.customMetadata?.mimeType || 'image/jpeg';
+        const fileName = safeTenantFileName(obj.customMetadata?.originalName || key.split('/').pop() || 'tenant-slip');
+        return new Response(obj.body, {
+          status: 200,
+          headers: {
+            ...headers,
+            'Content-Type': contentType,
+            'Cache-Control': 'private, no-store',
+            'Content-Disposition': `inline; filename="${fileName.replace(/"/g, '')}"`,
+          },
+        });
+      }
+
       const [
         rooms,
         config,
@@ -2471,6 +2623,7 @@ export default {
         portalMessageState,
         lineRoomMessages,
         pendingSlipReviews,
+        tenantSlipArchive,
         meterPhotos,
         repairRequests,
       ] = await Promise.all([
@@ -2496,6 +2649,7 @@ export default {
         env.DB.get('portalMessageState'),
         env.DB.get('lineRoomMessages'),
         env.DB.get('pendingSlipReviews'),
+        env.DB.get('tenantSlipArchive'),
         env.DB.get('meterPhotos'),
         env.DB.get('repairRequests'),
       ]);
@@ -2593,6 +2747,7 @@ export default {
         portalMessageState: sanitizePortalMessageState(safeJsonParse(portalMessageState, {})),
         lineRoomMessages: sanitizeLineRoomMessages(safeJsonParse(lineRoomMessages, {})),
         pendingSlipReviews: sanitizePendingSlipReviews(safeJsonParse(pendingSlipReviews, {})),
+        tenantSlipArchive: sanitizeTenantSlipArchive(safeJsonParse(tenantSlipArchive, {})),
         meterPhotos: sanitizeMeterPhotoMap(safeJsonParse(meterPhotos, {})),
         repairRequests: sanitizeRepairRequests(safeJsonParse(repairRequests, [])),
       });
@@ -3093,6 +3248,8 @@ export default {
 
       const tenantName = String(tenants?.[requestedRoomNum]?.name || verified.name || '').trim();
       const roomInfo = 'ห้อง ' + requestedRoomNum + (tenantName ? ' (' + tenantName + ')' : '');
+      const portalSlipFileName = safeTenantFileName(slipInput.fileName || 'tenant-portal-slip');
+      let savedSlipImage = null;
       let slipData = null;
       let slipCheckError = '';
       try {
@@ -3102,10 +3259,31 @@ export default {
       }
 
       if (!slipData) {
+        try {
+          savedSlipImage = await saveTenantSlipImage({
+            roomNum: requestedRoomNum,
+            bytes: slipBytes,
+            mimeType,
+            source: 'Tenant Portal',
+            status: 'review',
+            note: slipCheckError || 'EasySlip verify failed',
+            lineUserId,
+            tenantName,
+            billingMeta,
+            fileName: portalSlipFileName,
+          });
+        } catch (err) {
+          await logEvent({ level: 'error', action: 'savePortalSlipImageFailed', message: err?.message || String(err), roomNum: requestedRoomNum });
+        }
         await setPendingSlipReview([requestedRoomNum], {
           reason: 'portal-slip-verify-failed',
           note: slipCheckError || 'ตรวจสลิปจาก Portal ไม่ได้',
           lineUserId,
+          slipImageId: savedSlipImage?.id || '',
+          slipImageKey: savedSlipImage?.key || '',
+          slipImageFileName: savedSlipImage?.fileName || '',
+          slipImageMimeType: savedSlipImage?.mimeType || '',
+          slipImageSize: savedSlipImage?.size || 0,
         });
         if (TOKEN && OWNER_ID) {
           try {
@@ -3153,7 +3331,31 @@ export default {
         ? new Date(slipData.dateTime).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' })
         : '?';
 
+      const saveCurrentPortalSlipImage = async (statusLabel, note = '') => {
+        if (savedSlipImage) return savedSlipImage;
+        try {
+          savedSlipImage = await saveTenantSlipImage({
+            roomNum: requestedRoomNum,
+            bytes: slipBytes,
+            mimeType,
+            source: 'Tenant Portal',
+            status: statusLabel,
+            note,
+            lineUserId,
+            tenantName,
+            amount: slipAmount,
+            ref,
+            billingMeta,
+            fileName: portalSlipFileName,
+          });
+        } catch (err) {
+          await logEvent({ level: 'error', action: 'savePortalSlipImageFailed', message: err?.message || String(err), roomNum: requestedRoomNum, ref });
+        }
+        return savedSlipImage;
+      };
+
       if (slipData.isDuplicate) {
+        await saveCurrentPortalSlipImage('duplicate', 'EasySlip duplicate');
         if (TOKEN && lineUserId) {
           try {
             await pushLine(
@@ -3199,6 +3401,7 @@ export default {
       }
 
       if (slipRefs[refKey]) {
+        await saveCurrentPortalSlipImage('duplicate', 'Duplicate slip ref');
         const used = slipRefs[refKey] || {};
         if (TOKEN && lineUserId) {
           try {
@@ -3243,12 +3446,18 @@ export default {
 
       const room = rooms[requestedRoomNum] || rooms[Number(requestedRoomNum)] || null;
       if (!room) {
+        await saveCurrentPortalSlipImage('review', 'Room missing');
         await setPendingSlipReview([requestedRoomNum], {
           reason: 'portal-slip-room-missing',
           note: 'ไม่พบข้อมูลห้องใน rooms ตอนตรวจสลิป Portal',
           lineUserId,
           amount: slipAmount,
           ref,
+          slipImageId: savedSlipImage?.id || '',
+          slipImageKey: savedSlipImage?.key || '',
+          slipImageFileName: savedSlipImage?.fileName || '',
+          slipImageMimeType: savedSlipImage?.mimeType || '',
+          slipImageSize: savedSlipImage?.size || 0,
         });
         await logEvent({ level: 'error', action: 'portalSlipRoomMissing', message: 'Room not found for portal slip', roomNum: requestedRoomNum, ref });
         return jsonResponse({ ok: true, status: 'review', roomNum: requestedRoomNum, message: 'รับสลิปแล้ว แต่ระบบไม่พบข้อมูลห้อง เจ้าของหอจะตรวจสอบต่อให้ครับ' });
@@ -3260,12 +3469,18 @@ export default {
       const oldDebt = getRoomArrearsTotal(arrears, requestedRoomNum);
       const totalDue = oldDebt + currentExpected;
       if (!(slipAmount > 0) || totalDue <= 0) {
+        await saveCurrentPortalSlipImage('review', totalDue <= 0 ? 'No outstanding amount' : 'Invalid slip amount');
         await setPendingSlipReview([requestedRoomNum], {
           reason: totalDue <= 0 ? 'portal-slip-no-outstanding' : 'portal-slip-zero-amount',
           note: totalDue <= 0 ? 'ห้องนี้ไม่มียอดค้างในเวลาที่แนบสลิป' : 'ยอดสลิปเป็น 0 หรืออ่านยอดไม่ได้',
           lineUserId,
           amount: slipAmount,
           ref,
+          slipImageId: savedSlipImage?.id || '',
+          slipImageKey: savedSlipImage?.key || '',
+          slipImageFileName: savedSlipImage?.fileName || '',
+          slipImageMimeType: savedSlipImage?.mimeType || '',
+          slipImageSize: savedSlipImage?.size || 0,
         });
         if (TOKEN && OWNER_ID) {
           try {
@@ -3286,6 +3501,7 @@ export default {
       }
 
       await autoBackupBeforeImportantAction('before_portal_slip_payment_room_' + requestedRoomNum, billingMeta || {});
+      await saveCurrentPortalSlipImage('verified', 'Payment applied');
       const applyResult = applyPaymentToRoom({
         roomNum: requestedRoomNum,
         amount: slipAmount,
@@ -3311,6 +3527,8 @@ export default {
         usedAt: new Date().toISOString(),
         usedAtText: thTime(),
         source: 'Tenant Portal',
+        slipImageId: savedSlipImage?.id || '',
+        slipImageKey: savedSlipImage?.key || '',
       };
 
       const status = applyResult.remainingTotal <= 0 ? 'verified' : 'partial';
@@ -3332,6 +3550,8 @@ export default {
         paidAtText: thTime(),
         status,
         source: 'EasySlip Portal',
+        slipImageId: savedSlipImage?.id || '',
+        slipImageKey: savedSlipImage?.key || '',
       });
       while (paymentHistory.length > 1000) paymentHistory.shift();
       if (applyResult.remainingTotal <= 0 && cfg?.reminderMuteRooms) {
@@ -5445,6 +5665,8 @@ ${tenantName ? `คุณ ${tenantName}\n` : ''}${roomText}
 
               let slipData = null;
               let slipCheckError = '';
+              let lineSlipBytes = null;
+              let savedLineSlipImage = null;
 
               try {
                 const imageRes = await fetch(
@@ -5455,6 +5677,7 @@ ${tenantName ? `คุณ ${tenantName}\n` : ''}${roomText}
                 if (!imageRes.ok) throw new Error('LINE image fetch failed: ' + imageRes.status);
 
                 const imageBuffer = await imageRes.arrayBuffer();
+                lineSlipBytes = new Uint8Array(imageBuffer);
                 const base64Image = 'data:image/jpeg;base64,' + arrayBufferToBase64(imageBuffer);
 
                 try {
@@ -5497,10 +5720,30 @@ ${tenantName ? `คุณ ${tenantName}\n` : ''}${roomText}
                 );
 
                 if (linkedRoomNums.length) {
+                  try {
+                    savedLineSlipImage = await saveTenantSlipImage({
+                      roomNum: linkedRoomNums[0],
+                      bytes: lineSlipBytes,
+                      mimeType: 'image/jpeg',
+                      source: 'LINE OA',
+                      status: 'review',
+                      note: slipCheckError || 'EasySlip verify failed',
+                      lineUserId: userId,
+                      billingMeta,
+                      fileName: 'line-slip',
+                    });
+                  } catch (err) {
+                    await logEvent({ level: 'error', action: 'saveLineSlipImageFailed', message: err?.message || String(err), extra: { linkedRoomNums, userId } });
+                  }
                   await setPendingSlipReview(linkedRoomNums, {
                     reason: 'slip-verify-failed',
                     note: slipCheckError || 'ตรวจสลิปไม่ได้',
                     lineUserId: userId,
+                    slipImageId: savedLineSlipImage?.id || '',
+                    slipImageKey: savedLineSlipImage?.key || '',
+                    slipImageFileName: savedLineSlipImage?.fileName || '',
+                    slipImageMimeType: savedLineSlipImage?.mimeType || '',
+                    slipImageSize: savedLineSlipImage?.size || 0,
                   });
                 }
 
@@ -5524,7 +5767,33 @@ ${tenantName ? `คุณ ${tenantName}\n` : ''}${roomText}
                 ? new Date(slipData.dateTime).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' })
                 : '?';
 
+              const saveCurrentLineSlipImage = async (targetRoomNum, statusLabel, note = '') => {
+                if (savedLineSlipImage) return savedLineSlipImage;
+                const safeTargetRoom = String(parseInt(targetRoomNum || linkedRoomNums[0] || 0, 10) || '').trim();
+                if (!safeTargetRoom || !isValidRoomNum(safeTargetRoom)) return null;
+                try {
+                  savedLineSlipImage = await saveTenantSlipImage({
+                    roomNum: safeTargetRoom,
+                    bytes: lineSlipBytes,
+                    mimeType: 'image/jpeg',
+                    source: 'LINE OA',
+                    status: statusLabel,
+                    note,
+                    lineUserId: userId,
+                    tenantName: ten?.[safeTargetRoom]?.name || '',
+                    amount: slipAmount,
+                    ref,
+                    billingMeta,
+                    fileName: 'line-slip',
+                  });
+                } catch (err) {
+                  await logEvent({ level: 'error', action: 'saveLineSlipImageFailed', message: err?.message || String(err), roomNum: safeTargetRoom, ref });
+                }
+                return savedLineSlipImage;
+              };
+
               if (slipData.isDuplicate) {
+                await saveCurrentLineSlipImage(linkedRoomNums[0], 'duplicate', 'EasySlip duplicate');
                 await pushLine(
                   TOKEN,
                   userId,
@@ -5587,12 +5856,18 @@ ${tenantName ? `คุณ ${tenantName}\n` : ''}${roomText}
                 const candidateRoomNums = (matchRoom.candidates || [])
                   .map(c => String(parseInt(c?.roomNum || 0, 10) || '').trim())
                   .filter(candidateRoomNum => candidateRoomNum && isValidRoomNum(candidateRoomNum));
+                await saveCurrentLineSlipImage(candidateRoomNums[0] || linkedRoomNums[0], 'review', matchRoom.reason || 'Room match failed');
                 await setPendingSlipReview(candidateRoomNums.length ? candidateRoomNums : linkedRoomNums, {
                   reason: 'slip-room-match-failed',
                   note: matchRoom.reason || 'เลือกห้องไม่ได้อัตโนมัติ',
                   lineUserId: userId,
                   amount: slipAmount,
                   ref,
+                  slipImageId: savedLineSlipImage?.id || '',
+                  slipImageKey: savedLineSlipImage?.key || '',
+                  slipImageFileName: savedLineSlipImage?.fileName || '',
+                  slipImageMimeType: savedLineSlipImage?.mimeType || '',
+                  slipImageSize: savedLineSlipImage?.size || 0,
                 });
 
                 await pushLine(
@@ -5630,6 +5905,7 @@ ${tenantName ? `คุณ ${tenantName}\n` : ''}${roomText}
 
               if (slipRefs[refKey]) {
                 const used = slipRefs[refKey];
+                await saveCurrentLineSlipImage(roomNum, 'duplicate', 'Duplicate slip ref');
 
                 await pushLine(
                   TOKEN,
@@ -5668,6 +5944,7 @@ ${tenantName ? `คุณ ${tenantName}\n` : ''}${roomText}
                 const totalDue = oldDebt + currentExpected;
 
                 await autoBackupBeforeImportantAction('before_slip_payment_room_' + roomNum, billingMeta || {});
+                await saveCurrentLineSlipImage(roomNum, 'verified', 'Payment applied');
 
                 const applyResult = applyPaymentToRoom({
                   roomNum,
@@ -5693,6 +5970,8 @@ ${tenantName ? `คุณ ${tenantName}\n` : ''}${roomText}
                   slipDateTime: slipData.dateTime || '',
                   usedAt: new Date().toISOString(),
                   usedAtText: thTime(),
+                  slipImageId: savedLineSlipImage?.id || '',
+                  slipImageKey: savedLineSlipImage?.key || '',
                 };
 
                 const status = applyResult.remainingTotal <= 0 ? 'verified' : 'partial';
@@ -5715,6 +5994,8 @@ ${tenantName ? `คุณ ${tenantName}\n` : ''}${roomText}
                   paidAtText: thTime(),
                   status,
                   source: isTestRoom(roomNum) ? 'EasySlip TEST' : 'EasySlip',
+                  slipImageId: savedLineSlipImage?.id || '',
+                  slipImageKey: savedLineSlipImage?.key || '',
                 };
 
                 if (isTestRoom(roomNum)) paymentRecord = markTestPaymentRecord(paymentRecord);
