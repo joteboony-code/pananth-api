@@ -1723,8 +1723,11 @@ export default {
       };
     };
 
-    const pushLineFlexOnly = async (token, to, flexMessage) => {
+    const pushLineFlexOnly = async (token, to, flexMessage, text = '') => {
       if (!token || !to || !flexMessage) return { ok: false, error: 'Missing token/to/flexMessage' };
+      const messages = [flexMessage];
+      const cleanedText = text ? cleanTenantPortalLinkFromText(text) : '';
+      if (cleanedText) messages.push({ type: 'text', text: cleanedText });
 
       const res = await fetch('https://api.line.me/v2/bot/message/push', {
         method: 'POST',
@@ -1732,7 +1735,7 @@ export default {
           'Content-Type': 'application/json',
           Authorization: 'Bearer ' + token,
         },
-        body: JSON.stringify({ to, messages: [flexMessage] }),
+        body: JSON.stringify({ to, messages }),
       });
 
       let result = {};
@@ -5554,7 +5557,8 @@ ${tenantName ? `คุณ ${tenantName}\n` : ''}${roomText}
           ? body.flexData
           : {};
         const flexMessage = makeRentNoticeFlex(flexData, TENANT_PORTAL_URL);
-        const result = await pushLineFlexOnly(TOKEN, recipientId, flexMessage);
+        const textMessage = typeof body.message === 'string' ? body.message : '';
+        const result = await pushLineFlexOnly(TOKEN, recipientId, flexMessage, textMessage);
         const roomNum = String(parseInt(body.roomNum || flexData.room || flexData.roomNum || 0, 10) || '').trim();
         const historySummary = `📗 Flex แจ้งค่าเช่า — ห้อง ${roomNum || '-'} ยอด ${rentFlexAmount(flexData.totalDue).toLocaleString('th-TH')} บาท`;
         if (result.ok && roomNum && isValidRoomNum(roomNum)) {
@@ -5601,7 +5605,7 @@ ${tenantName ? `คุณ ${tenantName}\n` : ''}${roomText}
     // ===== ส่งข้อความจากเว็บ =====
     if (body.userId && body.message && !body.events) {
       try {
-        const result = await pushLine(TOKEN, body.userId, body.message, { portalFlex: true });
+        const result = await pushLine(TOKEN, body.userId, body.message, { portalFlex: body.portalFlex !== false });
         const roomNum = String(parseInt(body.roomNum || 0, 10) || '').trim();
         const messageKind = tenantSafeText(body.messageKind || 'webPush', 80);
         if (result.ok && roomNum && isValidRoomNum(roomNum)) {
